@@ -4,3 +4,4 @@ shots/
 __pycache__/
 *.blend
 docs/model.bin
+node_modules

@@ -9,7 +9,7 @@ const b = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', hea
 const p = await b.newPage(); await p.setViewport({ width: +W, height: +H, deviceScaleFactor: +dpr });
 await p.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: process.env.SCHEME || 'dark' }]);
 const logs = []; p.on('console', m => logs.push(m.type() + ': ' + m.text())); p.on('pageerror', e => logs.push('PAGEERROR: ' + e.message));
-await p.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
+await p.goto(process.env.URL || `http://127.0.0.1:${port}/`, { waitUntil: "load" });
 try { await p.waitForFunction('window.__app && window.__app.ready', { timeout: 120000 }); } catch (e) { logs.push('TIMEOUT waiting ready: ' + await p.evaluate(() => document.querySelector('#lmsg')?.textContent)); }
 let i = 0;
 for (const s of steps.length ? steps : ['']) {

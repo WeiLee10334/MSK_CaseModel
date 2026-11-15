@@ -94,10 +94,30 @@ export class Model {
     // 高度映射：腿段比例 a、上身比例 b，總身高不變
     const H0 = L.H0, yA = L.hipJ[1], wf = (y) => smooth(yA - 2, yA + 8, y); let I1 = 0, T1 = 0; const n = Math.round(H0 * LSTEP), nT = Math.round(L.yTroch * LSTEP);
     for (let i = 0; i < n; i++) { const w = wf((i + 0.5) / LSTEP) / LSTEP; I1 += w; if (i < nT) T1 += w; }
-    const I0 = H0 - I1, T0 = L.yTroch - T1, a = (this.pr.leg * H0 - H0 * T1 / I1) / (T0 - I0 * T1 / I1), b = (H0 - a * I0) / I1; this.legScale = a; this.upScale = b;
+    const I0 = H0 - I1, T0 = L.yTroch - T1, a = (this.pr.leg * H0 - H0 * T1 / I1) / (T0 - I0 * T1 / I1), b = (H0 - a * I0) / I1; this.legScale = a; this.upScale = b; this.legK = { I0, I1, T0, T1 };
     let acc = 0; this.YM[0] = 0;
     for (let i = 0; i <= LN; i++) { const y = i / LSTEP; this.SX[i] = interpS(nx, y); this.SZ[i] = interpS(nz, y); if (i > 0) { const w = wf((i - 0.5) / LSTEP); acc += (a + (b - a) * w) / LSTEP; this.YM[i] = acc; } }
     this.sxHip = this.SX[Math.round(yA * LSTEP)]; this.sxSh = this.SX[Math.round(yS * LSTEP)]; this.yShM = this.ymap(L.shoulder3[1]);
+  }
+  ctOn() { return this.ct && this.ct.on ? this.ct : null; }
+  // 胸椎中心點經過目前比例與寬深變形後的位置（未乘身高比例）；CT 形狀以它為原點貼上
+  anchorWarp() {
+    const L = this.lm, [x, y, z] = this.ct.anchor, t = y * LSTEP; let yi = t | 0; if (yi < 0) yi = 0; else if (yi >= LN) yi = LN - 1;
+    const l = this.LEGW[yi], d = z - this.ZS[yi], ez = d > CZ ? d - CZ : (d < -CZ ? 0.3 * (d + CZ) : 0);
+    return [x, this.YM[yi] + (t - yi) * (this.YM[yi + 1] - this.YM[yi]), z + (1 - l) * (this.SZ[yi] - 1) * ez];
+  }
+  // 載入 CT 個案檔（gzip 已解開的 ArrayBuffer）
+  setCT(buf) {
+    if (!buf) { this.ct = null; return null; }
+    const dv = new DataView(buf), jl = dv.getUint32(0, true), hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, jl)));
+    if (hdr.NV !== this.NV || hdr.NS !== this.NS) throw new Error('個案檔與目前模型版本不符');
+    let o = 4 + jl; const take = (T, n) => { const a = new T(buf, o, n); o = (o + n * T.BYTES_PER_ELEMENT + 3) & ~3; return a; };
+    const f = (a, k) => { const r = new Float32Array(a.length); for (let i = 0; i < a.length; i++) r[i] = a[i] * k; return r; };
+    const w = f(take(Uint8Array, this.NV), 1 / 255), u = f(take(Int16Array, this.NV * 3), 0.01), ws = f(take(Uint8Array, this.NS), 1 / 255), us = f(take(Int16Array, this.NS * 3), 0.01);
+    const ov = hdr.overlays.map(g => ({ ...g, V: f(take(Int16Array, g.nv * 3), 0.01), F: new Uint32Array(take(Uint32Array, g.nt * 3)) }));
+    const band = {}; for (const k in this.band) { let a = 0; const v = this.band[k].verts; for (const i of v) a += ws[i]; band[k] = a / v.length; }
+    this.ct = { hdr, w, u, ws, us, ov, anchor: hdr.anchor, s_ct: hdr.s_ct, band, on: true };
+    return this.ct;
   }
   ymap(y) { const t = y * LSTEP; let i = t | 0; if (i < 0) i = 0; else if (i >= LN) i = LN - 1; return this.YM[i] + (t - i) * (this.YM[i + 1] - this.YM[i]); }
   // 皮膚：脂肪層偏移（增厚時同時撫平肌肉線條）＋底下肌肉的增長＋乳房＋軀幹寬深＋比例。scale=false 留在基準身高（求解用）
@@ -106,6 +126,7 @@ export class Model {
     const xS = L.shoulder[0], xH = L.hipJ[0], dA = (this.sxSh - 1) * (xS - CX), dL = (this.sxHip - 1) * (xH - CX), s = scale ? this.s : 1, f1 = this.f - 1, sm = Math.max(this.sex === 'F' ? 0.6 : 0, f1 > 0 ? Math.min(1, f1 / 1.2) * 0.85 : 0), A = this.A;
     const S3 = L.shoulder3, u = this.armU, ca = this.pr.arm - 1, yShM = this.yShM, n = list ? list.length : this.NS, npx = L.nipple[0] + 0.6, npy = L.nipple[1];
     const sxSh = this.sxSh, axL = xS - 5, axH = xS - 0.5, ayL = L.yChest - 10, ayH = L.yChest - 3, lift = this.sex === 'F' ? 0.18 : 0;      // 女性各部位肌肉量差異較大，皮膚略為外移以免局部穿出
+    const C = this.ctOn(), cw = C ? C.ws : null, cu = C ? C.us : null, is = 1 / this.s, [Ax, Ay, Az] = C ? this.anchorWarp() : [0, 0, 0];
     for (let j = 0; j < n; j++) {
       const i = list ? list[j] : j, i3 = i * 3; let x = sb[i3], y = sb[i3 + 1], z = sb[i3 + 2];
       let off = tbE[i] * f1 + sSmN[i] * sm; if (off < -gap[i]) off = -gap[i]; off += lift;
@@ -121,6 +142,7 @@ export class Model {
       let sxe = SX[yi]; if (ax > axL && y > ayL) sxe += (sxSh - sxe) * smooth(axL, axH, ax) * smooth(ayL, ayH, y);
         let xt = x + sg * (l * dL + (1 - l) * (sxe - 1) * ex), yt = YM[yi] + (t - yi) * (YM[yi + 1] - YM[yi]), zt = z + (1 - l) * (SZ[yi] - 1) * ez;
       if (a > 0) { const q = ((x - sg * S3[0]) * u[0] * sg + (y - S3[1]) * u[1] + (z - S3[2]) * u[2]) * ca; xt += a * (x + q * u[0] * sg + sg * dA - xt); yt += a * (yShM + (y - S3[1]) + q * u[1] - yt); zt += a * (z + q * u[2] - zt); }
+      if (cw) { const w = cw[i]; if (w > 0) { xt += w * (Ax + cu[i3] * is - xt); yt += w * (Ay + cu[i3 + 1] * is - yt); zt += w * (Az + cu[i3 + 2] * is - zt); } }
       out[i3] = xt * s; out[i3 + 1] = yt * s; out[i3 + 2] = zt * s;
     }
   }
@@ -128,6 +150,7 @@ export class Model {
     const L = this.lm, b = this.base, out = this.pos, F = this.F, VRG = this.VRG, VRG2 = this.VRG2, VFR = this.VFR, g = this.g, fk = this.fk, SX = this.SX, SZ = this.SZ, ZS = this.ZS, YM = this.YM, LEGW = this.LEGW, aw = this.armW, NVd = this.NVd, s = this.s, box = this.box;
     const xS = L.shoulder[0], xH = L.hipJ[0], dA = (this.sxSh - 1) * (xS - CX), dL = (this.sxHip - 1) * (xH - CX), S3 = L.shoulder3, u = this.armU, ca = this.pr.arm - 1, yShM = this.yShM;
     const sxSh = this.sxSh, axL = xS - 5, axH = xS - 0.5, ayL = L.yChest - 10, ayH = L.yChest - 3;
+    const C = this.ctOn(), cw = C ? C.w : null, cu = C ? C.u : null, is = 1 / s, [Ax, Ay, Az] = C ? this.anchorWarp() : [0, 0, 0];
     for (const p of this.parts) {
       let x0 = 1e9, y0 = 1e9, z0 = 1e9, x1 = -1e9, y1 = -1e9, z1 = -1e9;
       for (let i = p.v0, e = p.v0 + p.nv; i < e; i++) {
@@ -138,6 +161,7 @@ export class Model {
         let sxe = SX[yi]; if (ax > axL && y > ayL) sxe += (sxSh - sxe) * smooth(axL, axH, ax) * smooth(ayL, ayH, y);
         let xt = x + sg * (l * dL + (1 - l) * (sxe - 1) * ex), yt = YM[yi] + (t - yi) * (YM[yi + 1] - YM[yi]), zt = z + (1 - l) * (SZ[yi] - 1) * ez;
         if (a > 0) { const q = ((x - sg * S3[0]) * u[0] * sg + (y - S3[1]) * u[1] + (z - S3[2]) * u[2]) * ca; xt += a * (x + q * u[0] * sg + sg * dA - xt); yt += a * (yShM + (y - S3[1]) + q * u[1] - yt); zt += a * (z + q * u[2] - zt); }
+        if (cw) { const w = cw[i]; if (w > 0) { xt += w * (Ax + cu[i3] * is - xt); yt += w * (Ay + cu[i3 + 1] * is - yt); zt += w * (Az + cu[i3 + 2] * is - zt); } }
         x = xt * s; y = yt * s; z = zt * s; out[i3] = x; out[i3 + 1] = y; out[i3 + 2] = z;
         if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
       }
@@ -180,14 +204,17 @@ export class Model {
     return Math.abs(v) / 6000;      // 公升
   }
   bandGirth(k) { const b = this.band[k]; this.deformSkin(this.spos, b.verts, false); return this.girthAt(this.spos, b.tris, this.ymap(b.y)); }
-  setG(gG, off) { for (let r = 1; r <= 10; r++) this.g[r] = Math.min(2.0, Math.max(-0.95, gG + this.gSex[r] + (off ? off[r] || 0 : 0))); this.g[0] = 0; }
+  setG(gG, off) { for (let r = 1; r <= 10; r++) this.g[r] = Math.min(2.0, Math.max(-0.95, (this.gCT ? this.gCT[r] : gG + this.gSex[r]) + (off ? off[r] || 0 : 0))); this.g[0] = 0; }
   // 依個案資料求解。c: {sex,H,W,chest,under,waist,hip,bf,auto,muscle,off[],leg,arm,shoulder}
   // 身高→等比例縮放；腿長比例→腿段與上身的高度分配；腰、臀圍→該高度的軀幹寬深；
   // 男性胸圍→胸廓寬深；女性下胸圍→胸廓、上胸圍→乳房體積；體重→皮下脂肪層倍率 f；
   // 自動模式以體脂率（實測，或由腰圍身高比 RFM 推估）決定肌肉量 g。
   solve(c) {
     if (c.sex !== this.sex) this.setSex(c.sex);
-    this.setProportions({ leg: c.leg, arm: c.arm, shoulder: c.shoulder });
+    const C = this.ctOn(), s0 = c.H / this.lm.H0;
+    this.setProportions({ leg: c.leg, arm: c.arm, shoulder: C ? C.s_ct / s0 * (c.shoulder || 1) : c.shoulder });
+    if (C && c.legAuto) { this.buildLUT(); const K = this.legK, b = C.s_ct / s0, a = (this.lm.H0 - b * K.I1) / K.I0; this.pr.leg = (a * K.T0 + b * K.T1) / this.lm.H0; }
+    const ctBand = (k) => C && C.band[k] > 0.5;
     const s = this.s = c.H / this.lm.H0, s3 = s ** 3, k0 = this.k0, air = this.air, phi = this.phi0, F = c.sex === 'F';
     // 下胸圍未填時：由腰圍與上胸圍各半推估，並把上下胸圍差限制在 7–22 cm
     const under = F ? (c.under > 0 ? c.under : Math.min(c.chest - 7, Math.max(c.chest - 22, 0.5 * (0.75 * c.waist + 22) + 0.5 * (c.chest - 13)))) : 0;
@@ -202,8 +229,9 @@ export class Model {
       }
     };
     const fitK = () => {
-      for (const k of ['H', 'W']) secant(() => this.kf[k], (v) => { this.kf[k] = v; }, k, 0.55 * k0[k], 1.9 * k0[k]);
-      if (F) {
+      for (const k of ['H', 'W']) if (!ctBand(k)) secant(() => this.kf[k], (v) => { this.kf[k] = v; }, k, 0.55 * k0[k], 1.9 * k0[k]);
+      if (ctBand('C')) { this.A = 0; this.kf.C = k0.C; }
+      else if (F) {
         this.A = 0; secant(() => this.kf.C, (v) => { this.kf.C = v; }, 'U', 0.55 * k0.C, 1.9 * k0.C);
         this.buildLUT(); const flat = this.bandGirth('C');
         if (tg.C > flat + 0.05) {
@@ -229,19 +257,22 @@ export class Model {
     };
     let last = null; const fatFor = (g) => { setMuscle(g); const r = root((f) => massAt(f).M, 0.3, 12, Wb, 0.03, 12); last = massAt(r.x); last.fclamp = r.clamp; last.f = r.x; return last; };
     let g = c.muscle, bfPrior = null, bfSrc = '';
-    if (c.auto) {
+    this.gCT = null;
+    if (c.auto && C && C.hdr.g && C.hdr.g.all != null) {      // CT 模式：肌肉發達程度取自 CT，脂肪層由體重決定
+      const G = C.hdr.g; g = G.all; this.gCT = [0, G.all, G.chest ?? G.all, G.chest ?? G.all, G.back ?? G.all, G.all, G.all, G.all, G.all, G.all, G.all]; bfSrc = 'CT 肌肉量＋體重';
+    } else if (c.auto) {
       const rfm = (F ? 76 : 64) - 20 * c.H / c.waist;
       if (c.bf > 0) { bfPrior = c.bf; bfSrc = '實測輸入'; } else { bfPrior = Math.min(F ? 52 : 45, Math.max(F ? 14 : 6, rfm)); bfSrc = 'RFM 推估'; }
       // 體重優先：脂肪層到下限仍過重時視為肌肉過多，到上限仍過輕時視為肌肉不足
       const r = root((gg) => { const q = fatFor(gg); return q.fclamp < 0 ? 5 : q.fclamp > 0 ? -100 : -q.bf; }, -0.8, 1.5, -bfPrior, 0.12, 10); g = r.x; if (r.clamp) note.g = r.clamp;
     }
     const m = fatFor(g); if (m.fclamp) note.f = m.fclamp;
-    return { gG: g, f: m.f, A: this.A, under, kf: { ...this.kf }, k0: { ...k0 }, bfPrior, bfSrc, note, legScale: this.legScale, upScale: this.upScale, mass: { M: m.M * s3, V: m.V * s3, Vfat: m.Vfat * s3, bf: m.bf } };
+    return { gG: g, f: m.f, A: this.A, under, kf: { ...this.kf }, k0: { ...k0 }, bfPrior, bfSrc, note, legScale: this.legScale, upScale: this.upScale, leg: this.pr.leg, ct: C ? { band: C.band } : null, mass: { M: m.M * s3, V: m.V * s3, Vfat: m.Vfat * s3, bf: m.bf } };
   }
   apply(full) {
     this.buildLUT(); this.deformStructure(); this.deformSkin(this.spos, null, true);
     const P = this.parts, lastDef = P.findIndex(p => p.v0 >= this.NVd), pd = lastDef < 0 ? P.length : lastDef;
-    if (full) this.normals(this.pos, this.idx, this.nrm, 0, this.NT, 0, this.NV);
+    if (full || this.ctOn()) this.normals(this.pos, this.idx, this.nrm, 0, this.NT, 0, this.NV);
     else this.normals(this.pos, this.idx, this.nrm, 0, P[pd - 1].t0 + P[pd - 1].nt, 0, this.NVd);
     this.normals(this.spos, this.stri, this.snrm, 0, this.NTs, 0, this.NS);
   }

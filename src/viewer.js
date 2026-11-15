@@ -84,7 +84,7 @@ export class Viewer {
     this.skinMat.transparent = !full; this.skinMat.opacity = full ? 1 : op; this.skinMat.depthWrite = full; this.skinMat.depthFunc = full ? THREE.LessEqualDepth : THREE.LessEqualDepth; this.skinMat.needsUpdate = true; this.req();
   }
   setOutline(v) { this.outline = v; this.G.outline.visible = v && this.G.opaque.visible; this.req(); }
-  refresh() { this.aPos.needsUpdate = true; this.aNrm.needsUpdate = true; this.sPos.needsUpdate = true; this.sNrm.needsUpdate = true; this.uOutline.value = 0.07 * this.m.s; this.req(); }
+  refresh() { this.placeOverlays(); this.aPos.needsUpdate = true; this.aNrm.needsUpdate = true; this.sPos.needsUpdate = true; this.sNrm.needsUpdate = true; this.uOutline.value = 0.07 * this.m.s; this.req(); }
   select(p) {
     const col = this.col, c0 = this.col0, c = new THREE.Color(COL.select);
     if (this.selected) { const q = this.selected; col.set(c0.subarray(q.v0 * 3, (q.v0 + q.nv) * 3), q.v0 * 3); }
@@ -138,6 +138,24 @@ export class Viewer {
     if (hit) hit.point = new THREE.Vector3(o.x + d.x * best, o.y + d.y * best, o.z + d.z * best);
     return hit;
   }
+  // CT 疊圖：骨骼、體表、肺與心臟（座標以胸椎中心為原點，實際公分）
+  setOverlays(groups) {
+    if (this.ovGroup) { this.scene.remove(this.ovGroup); this.ovGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
+    this.ovGroup = null; this.ov = {};
+    if (!groups) { this.req(); return; }
+    const G = new THREE.Group(); G.renderOrder = 9;
+    for (const g of groups) {
+      const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(g.V, 3)); geo.setIndex(new THREE.BufferAttribute(g.F, 1)); geo.computeVertexNormals();
+      const skin = /體表/.test(g.name), mat = new THREE.MeshStandardMaterial({ color: g.color, roughness: 0.6, transparent: true, opacity: skin ? 0.16 : 0.5, depthWrite: false, side: THREE.DoubleSide });
+      const mesh = new THREE.Mesh(geo, mat); mesh.renderOrder = skin ? 11 : 10; mesh.visible = false; mesh.frustumCulled = false; G.add(mesh); this.ov[g.name] = mesh;
+    }
+    this.ovGroup = G; this.scene.add(G); this.placeOverlays(); this.req();
+  }
+  placeOverlays() {
+    if (!this.ovGroup || !this.m.ct) return; const s = this.m.s, a = this.m.anchorWarp();
+    this.ovGroup.position.set(a[0] * s, a[1] * s, a[2] * s); this.req();
+  }
+  showOverlay(name, on) { if (this.ov && this.ov[name]) { this.ov[name].visible = on; this.req(); } }
   clearMarks() { for (const c of [...this.marks.children]) { this.marks.remove(c); c.geometry && c.geometry.dispose(); } this.req(); }
   addLine(pts, color, closed) {
     const g = new THREE.BufferGeometry().setFromPoints(pts.map(p => p.isVector3 ? p : new THREE.Vector3(p[0], p[1], p[2])));
