@@ -20,9 +20,9 @@ Z-Anatomy 另列出其參考或納入的模型來源，完整清單見其 Readme
 - 計算肌肉增長位移場、皮下空間、皮膚平滑目標等參數化變形所需的資料。
 - 補上會陰處的皮膚開口，並產生女性體型用的皮膚修正量。
 
-## 示範個案（`docs/ct-demo.js`）
+## 示範個案（`docs/ct-demo.js`、`docs/ct-demo-vol.js`）
 
-由 3D Slicer SampleData 的 CTChest（`CT-chest.nrrd`，https://github.com/Slicer/SlicerTestingData ）經本專案的 CT 流程產生。依 3D Slicer 社群說明，隨 Slicer 釋出的範例資料適用 3D Slicer License（BSD 風格）：
+由 3D Slicer SampleData 的 CTACardio（`CTA-cardio.nrrd`，https://github.com/Slicer/SlicerTestingData ）經本專案的 CT 流程產生。依 3D Slicer 社群說明，隨 Slicer 釋出的範例資料適用 3D Slicer License（BSD 風格）：
 https://github.com/Slicer/Slicer/blob/main/License.txt
 
-檔案內只有模型頂點的位移與權重、擬合誤差、CT 實測摘要，以及由分割結果產生的骨骼、體表、肺與心臟疊圖網格，不含原始影像與任何個人資料。
+`ct-demo.js` 只有模型頂點的位移與權重、擬合誤差、CT 實測摘要與疊圖網格；`ct-demo-vol.js` 為降解析度（約 1.5 × 1.5 × 2.5 mm）的影像體積，供網頁檢視器使用。兩者皆不含任何個人資料。

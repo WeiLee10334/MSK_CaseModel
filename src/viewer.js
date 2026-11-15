@@ -52,9 +52,9 @@ export class Viewer {
     this.G.fascia = new THREE.Mesh(geo(), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.5, side: THREE.DoubleSide, transparent: true, opacity: 0.5, depthWrite: false })); this.G.fascia.renderOrder = 3;
     this.G.bursa = new THREE.Mesh(geo(), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, side: THREE.DoubleSide, transparent: true, opacity: 0.7, depthWrite: false })); this.G.bursa.renderOrder = 4;
     for (const k in this.G) { this.G[k].frustumCulled = false; this.scene.add(this.G[k]); }
-    const sg = new THREE.BufferGeometry(); this.sPos = new THREE.BufferAttribute(m.spos, 3); this.sNrm = new THREE.BufferAttribute(m.snrm, 3);
-    sg.setAttribute('position', this.sPos); sg.setAttribute('normal', this.sNrm); sg.setIndex(new THREE.BufferAttribute(m.stri, 1));
-    this.skinMat = shade(new THREE.MeshStandardMaterial({ color: COL.skin, roughness: 0.75, side: THREE.FrontSide }), 'skin');
+    const sg = new THREE.BufferGeometry(); this.sPos = new THREE.BufferAttribute(m.spos, 3); this.sNrm = new THREE.BufferAttribute(m.snrm, 3); this.sCol = new THREE.BufferAttribute(new Float32Array(m.scolM), 3);
+    sg.setAttribute('position', this.sPos); sg.setAttribute('normal', this.sNrm); sg.setAttribute('color', this.sCol); sg.setIndex(new THREE.BufferAttribute(m.stri, 1)); this.skinSex = 'M';
+    this.skinMat = shade(new THREE.MeshStandardMaterial({ color: COL.skin, roughness: 0.75, side: THREE.FrontSide, vertexColors: true }), 'skin');
     this.skin = new THREE.Mesh(sg, this.skinMat); this.skin.frustumCulled = false; this.skin.renderOrder = 6;
     this.skinPre = new THREE.Mesh(sg, new THREE.MeshBasicMaterial({ colorWrite: false, transparent: true })); this.skinPre.frustumCulled = false; this.skinPre.renderOrder = 5;
     this.scene.add(this.skinPre, this.skin);
@@ -62,12 +62,14 @@ export class Viewer {
     this.rebuild(); this.setSkin(0);
   }
   visible(p) {
+    if (this.layers.skin > 0.985 && p.layer !== 'eye' && p.layer !== 'hair') return false;      // 皮膚完全不透明時內部看不到，不畫，也就不會有穿出的碎片
     if (!this.layers[p.layer]) return false; if (this.hidden.has(p.i)) return false; if (this.m.sex === 'F' && p.male) return false;
     if (this.isolate && !this.isolate.has(p.i)) return false;
     if (this.sideMode === 'L' && p.side === 1) return false; if (this.sideMode === 'R' && p.side === 0) return false;
     return true;
   }
   rebuild() {
+    if (this.skinSex !== this.m.sex) { const F = this.m.sex === 'F'; this.skin.geometry.setIndex(new THREE.BufferAttribute(this.m.skinTris(), 1)); this.sCol.array.set(F ? this.m.scolF : this.m.scolM); this.sCol.needsUpdate = true; this.skinSex = this.m.sex; }
     const m = this.m, sets = { opaque: [], ins: [], fascia: [], bursa: [] }; this.vis = new Uint8Array(m.parts.length);
     for (const p of m.parts) { if (!this.visible(p)) continue; this.vis[p.i] = 1; sets[OPAQUE.includes(p.layer) ? 'opaque' : p.layer].push(p); }
     for (const k in sets) {
@@ -79,7 +81,7 @@ export class Viewer {
   }
   setLayer(k, v) { this.layers[k] = v; if (k === 'skin') this.setSkin(v); else this.rebuild(); }
   setSkin(op) {
-    this.layers.skin = op; const on = op > 0.01, full = op > 0.985; const hair = op > 0.5; if (hair !== this.layers.hair) { this.layers.hair = hair; this.rebuild(); }
+    const wasFull = this.layers.skin > 0.985; this.layers.skin = op; const on = op > 0.01, full = op > 0.985; const hair = op > 0.5; if (hair !== this.layers.hair || wasFull !== full) { this.layers.hair = hair; this.rebuild(); }
     this.skin.visible = on; this.skinPre.visible = on && !full;
     this.skinMat.transparent = !full; this.skinMat.opacity = full ? 1 : op; this.skinMat.depthWrite = full; this.skinMat.depthFunc = full ? THREE.LessEqualDepth : THREE.LessEqualDepth; this.skinMat.needsUpdate = true; this.req();
   }
@@ -154,6 +156,24 @@ export class Viewer {
   placeOverlays() {
     if (!this.ovGroup || !this.m.ct) return; const s = this.m.s, a = this.m.anchorWarp();
     this.ovGroup.position.set(a[0] * s, a[1] * s, a[2] * s); this.req();
+  }
+  // CT 檢視器的橫切面在 3D 中的位置：corners 為四角世界座標（前左、前右、後右、後左），img 為該層影像畫布
+  setSlicePlane(corners, img) {
+    if (!corners) { if (this.slicePlane) this.slicePlane.visible = false; this.req(); return; }
+    if (!this.slicePlane) {
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(12), 3)); g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([0, 1, 1, 1, 1, 0, 0, 0]), 2)); g.setIndex([0, 1, 2, 0, 2, 3]);
+      this.sliceTex = new THREE.CanvasTexture(document.createElement('canvas')); this.sliceTex.colorSpace = THREE.SRGBColorSpace;
+      const m = new THREE.MeshBasicMaterial({ map: this.sliceTex, transparent: true, opacity: 0.92, side: THREE.DoubleSide, depthWrite: false });
+      const mesh = new THREE.Mesh(g, m); mesh.renderOrder = 8; mesh.frustumCulled = false;
+      const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(15), 3));
+      const line = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: 0x50c8ff, depthTest: false, transparent: true })); line.renderOrder = 10; line.frustumCulled = false;
+      this.slicePlane = new THREE.Group(); this.slicePlane.add(mesh, line); this.sliceMesh = mesh; this.sliceLine = line; this.scene.add(this.slicePlane);
+    }
+    const p = this.sliceMesh.geometry.attributes.position, l = this.sliceLine.geometry.attributes.position;
+    corners.forEach((c, i) => { p.setXYZ(i, c[0], c[1], c[2]); l.setXYZ(i, c[0], c[1], c[2]); }); l.setXYZ(4, corners[0][0], corners[0][1], corners[0][2]);
+    p.needsUpdate = true; l.needsUpdate = true;
+    if (img) { this.sliceTex.image = img; this.sliceTex.needsUpdate = true; }
+    this.slicePlane.visible = true; this.req();
   }
   showOverlay(name, on) { if (this.ov && this.ov[name]) { this.ov[name].visible = on; this.req(); } }
   clearMarks() { for (const c of [...this.marks.children]) { this.marks.remove(c); c.geometry && c.geometry.dispose(); } this.req(); }

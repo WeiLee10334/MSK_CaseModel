@@ -17,13 +17,14 @@ export async function fetchModel(onProg) {
     const res = await fetch('model.bin'); if (!res.ok) throw new Error('模型資料下載失敗（' + res.status + '）');
     blob = await res.blob(); onProg && onProg(1);
   }
+  if (!window.__PATCH) await new Promise((ok) => { const sc = document.createElement('script'); sc.src = 'patches.js'; sc.onload = ok; sc.onerror = ok; document.head.appendChild(sc); });
   const head = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
   const buf = (head[0] === 0x1f && head[1] === 0x8b) ? await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer() : await blob.arrayBuffer();
-  return new Model(buf);
+  return new Model(buf, window.__PATCH || null);
 }
 
 export class Model {
-  constructor(buf) {
+  constructor(buf, patch) {
     const dv = new DataView(buf); const jl = dv.getUint32(0, true);
     const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, jl))); this.meta = meta; const L = this.lm = meta.lm;
     let o = 4 + jl; const take = (T, n) => { const a = new T(buf, o, n); o = (o + n * T.BYTES_PER_ELEMENT + 3) & ~3; return a; };
@@ -40,6 +41,18 @@ export class Model {
     this.sSmN = new Float32Array(NS);      // 撫平位移拆成法向量（受皮下空間限制）與切向量
     for (let i = 0; i < NS; i++) { const i3 = i * 3, d = this.sSm[i3] * this.sn[i3] + this.sSm[i3 + 1] * this.sn[i3 + 1] + this.sSm[i3 + 2] * this.sn[i3 + 2]; this.sSmN[i] = d; this.sSm[i3] -= d * this.sn[i3]; this.sSm[i3 + 1] -= d * this.sn[i3 + 1]; this.sSm[i3 + 2] -= d * this.sn[i3 + 2]; }
     this.stri = new Uint32Array(NTs * 3); this.stri.set(stl);
+    // 皮膚頂點鄰接（CSR），供平滑權重使用
+    { const deg = new Uint32Array(NS + 1); for (let t = 0; t < NTs * 3; t++) deg[this.stri[t] + 1] += 2; for (let i = 0; i < NS; i++) deg[i + 1] += deg[i];
+      const nb = new Uint32Array(deg[NS]), fill = deg.slice(0, NS); for (let t = 0; t < NTs; t++) { const a = this.stri[t * 3], b = this.stri[t * 3 + 1], c = this.stri[t * 3 + 2]; nb[fill[a]++] = b; nb[fill[a]++] = c; nb[fill[b]++] = c; nb[fill[b]++] = a; nb[fill[c]++] = a; nb[fill[c]++] = b; }
+      this.sAdj = { ptr: deg, nb }; }
+    // 女性皮膚外移量只用在軀幹與四肢（頭、手、腳的細小凹處外移會自我交疊）；邊界處平滑過渡
+    this.lw = new Float32Array(NS); for (let i = 0; i < NS; i++) this.lw[i] = (this.scls[i] & 8) ? 0 : 1;
+    this.lw = this.smoothS(this.lw, 4);
+    // 模板皮膚由多個物件拼成，接縫是各自開放、位置相鄰的邊界；撫平位移是各物件分別算的，接縫兩側不一致會裂開。
+    // 開放邊界附近把撫平位移逐漸減為 0
+    { const ec = new Map(); for (let t = 0; t < NTs; t++) for (let k = 0; k < 3; k++) { const a = this.stri[t * 3 + k], b = this.stri[t * 3 + (k + 1) % 3], key = a < b ? a * NS + b : b * NS + a; ec.set(key, (ec.get(key) || 0) + 1); }
+      const sw = new Float32Array(NS); for (const [key, c] of ec) if (c === 1) { sw[Math.floor(key / NS)] = 1; sw[key % NS] = 1; }
+      const k = this.smoothS(sw, 3); for (let i = 0; i < NS; i++) { const f = Math.max(0, 1 - 3 * k[i]); this.sSmN[i] *= f; this.sSm[i * 3] *= f; this.sSm[i * 3 + 1] *= f; this.sSm[i * 3 + 2] *= f; } }
     this.parts = meta.parts.map((p, i) => ({ i, t: p[0], side: p[1], v0: p[2], nv: p[3], t0: p[4], nt: p[5], rg: p[6], kind: p[7] & 3, seg: (p[7] >> 2) & 1, en: p[8], zh: p[9], grp: p[10], vol0: p[12], len0: p[13], layer: LAYER_OF[p[0]], male: (p[7] >> 3) & 1 }));
     this.idx = new Uint32Array(NT * 3);
     for (const p of this.parts) for (let k = p.t0 * 3, e = (p.t0 + p.nt) * 3; k < e; k++) this.idx[k] = tl[k] + p.v0;
@@ -48,12 +61,13 @@ export class Model {
     this.armW = new Float32Array(NV);
     for (const p of this.parts) for (let i = p.v0; i < p.v0 + p.nv; i++) this.armW[i] = p.seg ? 1 : geoArm(this.base[i * 3], this.base[i * 3 + 1]);
     this.sarmW = f32(sa8, 1 / 255);
+    this.addPatches(patch);
     const lut = (fn) => { const a = new Float32Array(LN + 1); for (let i = 0; i <= LN; i++) a[i] = fn(i / LSTEP); return a; };
     this.ZS = lut(y => interp(L.zs, y)); this.LEGW = lut(y => smooth(L.hipJ[1] - 2, L.hipJ[1] - 12, y)); this.SX = lut(() => 1); this.SZ = lut(() => 1); this.YM = lut(y => y);
     const d = [L.wrist3[0] - L.shoulder3[0], L.wrist3[1] - L.shoulder3[1], L.wrist3[2] - L.shoulder3[2]], dl = Math.hypot(d[0], d[1], d[2]); this.armU = d.map(v => v / dl);
     this.r0 = L.yTroch / L.H0; this.pr = { leg: this.r0, arm: 1, shoulder: 1 };
     this.g = new Float32Array(11); this.gSex = new Array(11).fill(0); this.s = 1; this.f = 1; this.A = 0; this.kf = { C: 1, W: 1, H: 1 }; this.sex = 'M';
-    this.tbEff = new Float32Array(NS); this.bump = new Float32Array(NS * 3); this.wB = new Float32Array(NS); this.setSex('M');
+    this.tbEff = new Float32Array(this.NSall); this.bump = new Float32Array(this.NSall * 3); this.wB = new Float32Array(this.NSall); this.setSex('M');
     const body = []; for (let t = 0; t < NTs; t++) { const a = this.stri[t * 3], b = this.stri[t * 3 + 1], c = this.stri[t * 3 + 2]; if (this.scls[a] < 16 && this.scls[b] < 16 && this.scls[c] < 16) body.push(t); }
     this.bodyTris = Uint32Array.from(body); this.band = {};
     for (const [k, y] of [['C', L.yChest], ['U', L.yUnder], ['W', L.yWaist], ['H', L.yHip]]) this.band[k] = this.makeBand(this.bodyTris, y, 9);
@@ -64,8 +78,43 @@ export class Model {
     for (const t of tris) { const a = st[t * 3], b = st[t * 3 + 1], c = st[t * 3 + 2]; const y0 = Math.min(sb[a * 3 + 1], sb[b * 3 + 1], sb[c * 3 + 1]), y1 = Math.max(sb[a * 3 + 1], sb[b * 3 + 1], sb[c * 3 + 1]); if (y1 > y - m && y0 < y + m) { out.push(t); vs.add(a); vs.add(b); vs.add(c); } }
     return { tris: Uint32Array.from(out), verts: Uint32Array.from(vs), y };
   }
+  // 女性皮膚補片（tools/build_patches.py）：補片頂點接在原皮膚頂點之後，屬性由原頂點內插，所以會跟著體型、脂肪、CT 一起變形
+  addPatches(P) {
+    const NS = this.NS, NP = P && P.NS === NS ? P.verts.length / 3 : 0, NA = this.NSall = NS + NP;
+    const ext = (a, k, fn) => { const r = new a.constructor(NA * k); r.set(a); if (NP) for (let j = 0; j < NP; j++) for (let c = 0; c < k; c++) r[(NS + j) * k + c] = fn(j, c); return r; };
+    const it = P ? P.interp : [], lin = (a, k) => (j, c) => { let v = 0; for (const [i, w] of it[j]) v += a[i * k + c] * w; return v; }, near = (a) => (j) => { let b = it[j][0]; for (const q of it[j]) if (q[1] > b[1]) b = q; return a[b[0]]; };
+    // 平滑胸壁法向（乳房推出方向與範圍用）：原頂點法向在網格上平均 8 次，不受乳頭或局部細密網格影響
+    const snS = new Float32Array(NS * 3); for (let c = 0; c < 3; c++) { const a = new Float32Array(NS); for (let i = 0; i < NS; i++) a[i] = this.sn[i * 3 + c]; const b = this.smoothS(a, 8); for (let i = 0; i < NS; i++) snS[i * 3 + c] = b[i]; }
+    for (let i = 0; i < NS; i++) { const l = Math.hypot(snS[i * 3], snS[i * 3 + 1], snS[i * 3 + 2]) || 1; snS[i * 3] /= l; snS[i * 3 + 1] /= l; snS[i * 3 + 2] /= l; }
+    this.snB = ext(snS, 3, lin(snS, 3));
+    this.sbase = ext(this.sbase, 3, (j, c) => P.verts[j * 3 + c]); this.sn = ext(this.sn, 3, (j, c) => P.normals[j * 3 + c]);
+    if (P && P.femDisp) for (const [i, dx, dy, dz] of P.femDisp) { this.sFem[i * 3] = dx; this.sFem[i * 3 + 1] = dy; this.sFem[i * 3 + 2] = dz; }      // 女性胯下周圍皮膚的提升量（原本的外生殖器頂點不再顯示）
+    this.sF = ext(this.sF, 3, lin(this.sF, 3)); this.sFem = ext(this.sFem, 3, () => 0); this.tb = ext(this.tb, 1, lin(this.tb, 1)); this.sgap = ext(this.sgap, 1, lin(this.sgap, 1));
+    this.sSm = ext(this.sSm, 3, lin(this.sSm, 3)); this.sSmN = ext(this.sSmN, 1, lin(this.sSmN, 1)); this.sarmW = ext(this.sarmW, 1, lin(this.sarmW, 1)); this.lw = ext(this.lw, 1, lin(this.lw, 1));
+    this.scls = ext(this.scls, 1, near(this.scls)); this.srg = ext(this.srg, 1, near(this.srg)); this.srg2 = ext(this.srg2, 1, near(this.srg2)); this.sfr = ext(this.sfr, 1, (j) => Math.round(lin(this.sfr, 1)(j, 0)));
+    this.spos = new Float32Array(NA * 3); this.snrm = new Float32Array(NA * 3);
+    this.clear = new Float32Array(NA); if (P && P.clear) for (const [i, v] of P.clear) if (i < NA) this.clear[i] = v;      // 皮膚間隙（tools/clearance.py）
+    this.femV = null; if (P && P.femDispV && P.femDispV.length) { this.femV = new Float32Array(this.NV * 3); for (const [i, dx, dy, dz] of P.femDispV) { this.femV[i * 3] = dx; this.femV[i * 3 + 1] = dy; this.femV[i * 3 + 2] = dz; } }
+    this.pInterp = it; this.scolM = new Float32Array(NA * 3).fill(1); this.scolF = new Float32Array(NA * 3).fill(1); this.skinTriF = null;
+    if (!NP) return;
+    const rm = new Uint8Array(this.NTs); for (const t of P.removeTris) rm[t] = 1; const keep = []; for (let t = 0; t < this.NTs; t++) if (!rm[t]) keep.push(this.stri[t * 3], this.stri[t * 3 + 1], this.stri[t * 3 + 2]);
+    this.skinTriF = Uint32Array.from(keep.concat(P.tris));
+    const AR = [0.80, 0.64, 0.60];      // 乳暈顏色（乘在皮膚色上）
+    for (let j = 0; j < NP; j++) { const a = P.areola[j]; for (let c = 0; c < 3; c++) this.scolF[(NS + j) * 3 + c] = 1 + (AR[c] - 1) * a; }
+  }
+  extS(a, k) {      // 長度為 NS 的皮膚陣列（例如 CT 個案資料）延伸到補片頂點
+    if (this.NSall === this.NS) return a; const r = new Float32Array(this.NSall * k); r.set(a);
+    for (let j = 0; j < this.pInterp.length; j++) for (let c = 0; c < k; c++) { let v = 0; for (const [i, w] of this.pInterp[j]) v += a[i * k + c] * w; r[(this.NS + j) * k + c] = v; }
+    return r;
+  }
+  skinTris() { return this.sex === 'F' && this.skinTriF ? this.skinTriF : this.stri; }
+  smoothS(a, it) {      // 皮膚上的純量場做鄰點平均
+    const { ptr, nb } = this.sAdj; let cur = a, nxt = new Float32Array(a.length);
+    for (let k = 0; k < it; k++) { for (let i = 0; i < a.length; i++) { let sum = 0; const e = ptr[i + 1]; for (let j = ptr[i]; j < e; j++) sum += cur[nb[j]]; nxt[i] = e > ptr[i] ? 0.5 * cur[i] + 0.5 * sum / (e - ptr[i]) : cur[i]; } [cur, nxt] = [nxt, cur]; }
+    return cur;
+  }
   setSex(sex) {
-    this.sex = sex; const L = this.lm, F = sex === 'F', NS = this.NS, sb = this.sbase, sn = this.sn, np = L.nipple;
+    this.sex = sex; const L = this.lm, F = sex === 'F', NS = this.NSall, sb = this.sbase, sn = this.sn, np = L.nipple;
     const prof = [[L.yAnkle + 3, 0.2, 0.2], [L.yKnee - 8, 0.45, 0.55], [L.yKnee + 6, 0.6, 0.85], [L.yCrotch - 12, 0.8, 1.2], [L.yHip, 0.95, 1.3], [L.yWaist, 1.0, 0.95], [L.yChest - 6, 0.9, 0.9], [L.yChest + 4, 0.75, 0.85], [L.shoulder[1] + 4, 0.4, 0.4]];
     const tab = prof.map(p => [p[0], F ? p[2] : p[1]]);
     for (let i = 0; i < NS; i++) {
@@ -77,7 +126,8 @@ export class Model {
       this.bump[i * 3] = F ? this.sFem[i * 3] : 0; this.bump[i * 3 + 1] = F ? this.sFem[i * 3 + 1] : 0; this.bump[i * 3 + 2] = F ? this.sFem[i * 3 + 2] : 0;
       // 乳房候選頂點：只取前胸、朝前的皮膚；形狀在 deformSkin 依投影量 A 即時計算
       let w = 0;
-      if (F && c === 0 && sn[i * 3 + 2] > 0) { const dx = Math.abs(sb[i * 3]) - (np[0] + 0.6), dy = y - np[1]; if (Math.abs(dx) < 13 && dy > -12 && dy < 16) w = Math.min(1, sn[i * 3 + 2] * 3); }
+      const nB = this.snB;      // 平滑胸壁法向（不受乳頭細節影響）
+      if (F && c === 0 && nB[i * 3 + 2] > -0.3) { const dx = Math.abs(sb[i * 3]) - np[0], dy = y - np[1]; if (dx > -7 && dx < 7.5 && dy > -8 && dy < 11) w = smooth(-0.3, 0.35, nB[i * 3 + 2]); }
       this.wB[i] = w;
     }
     this.k0 = F ? { C: 0.88, W: 0.92, H: 1.05, S: 1.0 } : { C: 1, W: 1, H: 1, S: 1 };
@@ -116,7 +166,7 @@ export class Model {
     const w = f(take(Uint8Array, this.NV), 1 / 255), u = f(take(Int16Array, this.NV * 3), 0.01), ws = f(take(Uint8Array, this.NS), 1 / 255), us = f(take(Int16Array, this.NS * 3), 0.01);
     const ov = hdr.overlays.map(g => ({ ...g, V: f(take(Int16Array, g.nv * 3), 0.01), F: new Uint32Array(take(Uint32Array, g.nt * 3)) }));
     const band = {}; for (const k in this.band) { let a = 0; const v = this.band[k].verts; for (const i of v) a += ws[i]; band[k] = a / v.length; }
-    this.ct = { hdr, w, u, ws, us, ov, anchor: hdr.anchor, s_ct: hdr.s_ct, band, on: true };
+    this.ct = { hdr, w, u, ws: this.extS(ws, 1), us: this.extS(us, 3), ov, anchor: hdr.anchor, s_ct: hdr.s_ct, band, on: true };
     return this.ct;
   }
   ymap(y) { const t = y * LSTEP; let i = t | 0; if (i < 0) i = 0; else if (i >= LN) i = LN - 1; return this.YM[i] + (t - i) * (this.YM[i + 1] - this.YM[i]); }
@@ -124,18 +174,27 @@ export class Model {
   deformSkin(out, list, scale) {
     const L = this.lm, sb = this.sbase, sn = this.sn, sF = this.sF, g = this.g, SX = this.SX, SZ = this.SZ, ZS = this.ZS, YM = this.YM, LEGW = this.LEGW, tbE = this.tbEff, gap = this.sgap, aw = this.sarmW, srg = this.srg, srg2 = this.srg2, sfr = this.sfr, bump = this.bump, sSm = this.sSm, sSmN = this.sSmN, wB = this.wB;
     const xS = L.shoulder[0], xH = L.hipJ[0], dA = (this.sxSh - 1) * (xS - CX), dL = (this.sxHip - 1) * (xH - CX), s = scale ? this.s : 1, f1 = this.f - 1, sm = Math.max(this.sex === 'F' ? 0.6 : 0, f1 > 0 ? Math.min(1, f1 / 1.2) * 0.85 : 0), A = this.A;
-    const S3 = L.shoulder3, u = this.armU, ca = this.pr.arm - 1, yShM = this.yShM, n = list ? list.length : this.NS, npx = L.nipple[0] + 0.6, npy = L.nipple[1];
+    const S3 = L.shoulder3, u = this.armU, ca = this.pr.arm - 1, yShM = this.yShM, n = list ? list.length : this.NSall, npx = L.nipple[0], npy = L.nipple[1];
     const sxSh = this.sxSh, axL = xS - 5, axH = xS - 0.5, ayL = L.yChest - 10, ayH = L.yChest - 3, lift = this.sex === 'F' ? 0.18 : 0;      // 女性各部位肌肉量差異較大，皮膚略為外移以免局部穿出
-    const C = this.ctOn(), cw = C ? C.ws : null, cu = C ? C.us : null, is = 1 / this.s, [Ax, Ay, Az] = C ? this.anchorWarp() : [0, 0, 0];
+    const C = this.ctOn(), cw = C ? C.ws : null, cu = C ? C.us : null, is = 1 / this.s, [Ax, Ay, Az] = C ? this.anchorWarp() : [0, 0, 0], lw = this.lw, clr = this.clear;
     for (let j = 0; j < n; j++) {
       const i = list ? list[j] : j, i3 = i * 3; let x = sb[i3], y = sb[i3 + 1], z = sb[i3 + 2];
-      let off = tbE[i] * f1 + sSmN[i] * sm; if (off < -gap[i]) off = -gap[i]; off += lift;
+      let off = tbE[i] * f1 + sSmN[i] * sm; if (off < -gap[i]) off = -gap[i]; off += lift * lw[i] + clr[i];
       const fr = sfr[i] / 255, gk = g[srg[i]] * fr + g[srg2[i]] * (1 - fr), tk = gap[i] > 0.6 ? sm : sm * gap[i] / 0.6;
       x += sn[i3] * off + sF[i3] * gk + bump[i3] + sSm[i3] * tk; y += sn[i3 + 1] * off + sF[i3 + 1] * gk + bump[i3 + 1] + sSm[i3 + 1] * tk; z += sn[i3 + 2] * off + sF[i3 + 2] * gk + bump[i3 + 2] + sSm[i3 + 2] * tk;
       const sg = x >= 0 ? 1 : -1;
-      if (A > 0 && wB[i] > 0) {      // 乳房：下半圓弧、上半緩坡，越大越寬並略為下垂
-        const dx = (x < 0 ? -sb[i3] : sb[i3]) - npx, dy = sb[i3 + 1] - npy + Math.min(0.6, 0.06 * A), rx = dx >= 0 ? dx / (7.0 + 0.4 * A) : -dx / (5.4 + 0.2 * A), ry = dy >= 0 ? dy / (8.5 + 0.35 * A) : -dy / Math.min(6.2, 4.6 + 0.2 * A), q = 1 - rx * rx - ry * ry;
-        if (q > 0) { const up = dy <= -2 ? 0 : dy >= 3 ? 1 : (dy + 2) / 5, hgt = A * wB[i] * Math.pow(q, 0.8 + 0.9 * up); x += 0.16 * sg * hgt; y -= 0.03 * A * hgt / (1 + 0.1 * A); z += hgt; }
+      if (A > 0 && wB[i] > 0) {
+        // 乳房：底面上緣約第 2 肋、下緣為乳房下皺襞，內側離胸骨中線至少 1.6 cm（保留乳溝），外側不超過前腋線；
+        // 下半部飽滿、上半部緩坡，邊緣平滑銜接；向前並略向外、向下（重力）推出。A 為乳頭處的投影量（公分）
+        const dx = (sb[i3] < 0 ? -sb[i3] : sb[i3]) - npx, dy = sb[i3 + 1] - npy;
+        const rm = Math.min(npx - 1.6, 4.2 + 0.18 * A), rl = Math.min(14.6 - npx, 5.2 + 0.25 * A), ru = 6.2 + 0.28 * A, rd = 4.0 + 0.2 * A;
+        const rx = dx >= 0 ? dx / rl : -dx / rm, ry = dy >= 0 ? dy / ru : -dy / rd, r2 = rx * rx + ry * ry;
+        if (r2 < 1) {
+          const r = Math.sqrt(r2), lower = Math.pow(1 - r2, 1.25), upper = Math.pow(1 - r, 1.6) * (1 + 1.6 * r), tt = smooth(-1.0, 1.5, dy);
+          const hgt = A * wB[i] * (lower * (1 - tt) + upper * tt), sgr = sb[i3] >= 0 ? 1 : -1;
+          const nB = this.snB; let dxv = 0.45 * nB[i3] + 0.12 * sgr, dyv = 0.45 * nB[i3 + 1] - 0.1 - 0.006 * A, dzv = 0.45 * nB[i3 + 2] + 0.55; const dl = Math.hypot(dxv, dyv, dzv) || 1;
+          x += hgt * dxv / dl; y += hgt * dyv / dl; z += hgt * dzv / dl;
+        }
       }
       const t = y * LSTEP; let yi = t | 0; if (yi < 0) yi = 0; else if (yi >= LN) yi = LN - 1;
       const a = aw[i], l = LEGW[yi], ax = x * sg, ex = ax > CX ? ax - CX : 0, d = z - ZS[yi], ez = d > CZ ? d - CZ : (d < -CZ ? 0.3 * (d + CZ) : 0);
@@ -150,11 +209,12 @@ export class Model {
     const L = this.lm, b = this.base, out = this.pos, F = this.F, VRG = this.VRG, VRG2 = this.VRG2, VFR = this.VFR, g = this.g, fk = this.fk, SX = this.SX, SZ = this.SZ, ZS = this.ZS, YM = this.YM, LEGW = this.LEGW, aw = this.armW, NVd = this.NVd, s = this.s, box = this.box;
     const xS = L.shoulder[0], xH = L.hipJ[0], dA = (this.sxSh - 1) * (xS - CX), dL = (this.sxHip - 1) * (xH - CX), S3 = L.shoulder3, u = this.armU, ca = this.pr.arm - 1, yShM = this.yShM;
     const sxSh = this.sxSh, axL = xS - 5, axH = xS - 0.5, ayL = L.yChest - 10, ayH = L.yChest - 3;
-    const C = this.ctOn(), cw = C ? C.w : null, cu = C ? C.u : null, is = 1 / s, [Ax, Ay, Az] = C ? this.anchorWarp() : [0, 0, 0];
+    const C = this.ctOn(), cw = C ? C.w : null, cu = C ? C.u : null, is = 1 / s, [Ax, Ay, Az] = C ? this.anchorWarp() : [0, 0, 0], fv = this.sex === 'F' ? this.femV : null;
     for (const p of this.parts) {
       let x0 = 1e9, y0 = 1e9, z0 = 1e9, x1 = -1e9, y1 = -1e9, z1 = -1e9;
       for (let i = p.v0, e = p.v0 + p.nv; i < e; i++) {
         const i3 = i * 3; let x = b[i3], y = b[i3 + 1], z = b[i3 + 2];
+        if (fv) { x += fv[i3]; y += fv[i3 + 1]; z += fv[i3 + 2]; }
         if (i < NVd) { const fr = VFR[i], k = (g[VRG[i]] * fr + g[VRG2[i]] * (255 - fr)) * fk / 255; if (k !== 0) { x += F[i3] * k; y += F[i3 + 1] * k; z += F[i3 + 2] * k; } }
         const t = y * LSTEP; let yi = t | 0; if (yi < 0) yi = 0; else if (yi >= LN) yi = LN - 1;
         const a = aw[i], l = LEGW[yi], sg = x >= 0 ? 1 : -1, ax = x * sg, ex = ax > CX ? ax - CX : 0, d = z - ZS[yi], ez = d > CZ ? d - CZ : (d < -CZ ? 0.3 * (d + CZ) : 0);
@@ -274,7 +334,7 @@ export class Model {
     const P = this.parts, lastDef = P.findIndex(p => p.v0 >= this.NVd), pd = lastDef < 0 ? P.length : lastDef;
     if (full || this.ctOn()) this.normals(this.pos, this.idx, this.nrm, 0, this.NT, 0, this.NV);
     else this.normals(this.pos, this.idx, this.nrm, 0, P[pd - 1].t0 + P[pd - 1].nt, 0, this.NVd);
-    this.normals(this.spos, this.stri, this.snrm, 0, this.NTs, 0, this.NS);
+    const st = this.skinTris(); this.normals(this.spos, st, this.snrm, 0, st.length / 3, 0, st === this.stri ? this.NS : this.NSall);
   }
   partVolume(p) {
     const P = this.pos, ix = this.idx; let v = 0;

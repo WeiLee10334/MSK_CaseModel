@@ -9,6 +9,7 @@ API
     POST /api/ct              上傳（網頁的多檔容器格式，或單一 zip / nii / nrrd 檔）→ {"id": ...}
     GET  /api/ct/<id>         處理狀態 {"state": queued|running|done|error, "step", "progress", "log", "error"}
     GET  /api/ct/<id>/case    個案檔（.ctcase，gzip）
+    GET  /api/ct/<id>/volume  檢視用影像體積（gzip：標頭 JSON＋int16，約 1.5 mm）
     DELETE /api/ct/<id>       立即刪除該筆結果
 原始上傳檔在處理完（成功或失敗）後立即刪除；個案檔只保留在記憶體，逾時（預設 6 小時）或伺服器結束即消失。
 """
@@ -87,6 +88,8 @@ def run_job(job, upload_dir):
                 log_line(job, s)
             hdr = pipeline.run(pick_input(upload_dir), out, CFG['model'], workdir=work, fast=CFG['fast'], log=lambda *a: log_line(job, ' '.join(map(str, a))), step=step, device=CFG['device'])
             with open(out, 'rb') as f: job['case'] = f.read()
+            if os.path.exists(out + '.vol'):
+                with open(out + '.vol', 'rb') as f: job['vol'] = f.read()
             with LOCK: job.update(state='done', step='完成', progress=1.0)
         except Exception as e:
             traceback.print_exc()
@@ -126,13 +129,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         p = urlparse(self.path).path
         if p == '/api/health':
             return self.json(dict(ok=True, version='0.4', fast=CFG['fast'], device=CFG['device'] or 'auto', busy=any(j['state'] == 'running' for j in JOBS.values())))
-        m = re.fullmatch(r'/api/ct/([0-9a-f]{32})(/case)?', p)
+        m = re.fullmatch(r'/api/ct/([0-9a-f]{32})(/case|/volume)?', p)
         if m:
             j = self.job(m.group(1))
             if not j: return self.json(dict(error='找不到這筆工作（可能已逾時刪除）'), 404)
             if m.group(2):
                 if j['state'] != 'done': return self.json(dict(error='尚未完成'), 409)
-                b = j['case']; self.send_response(200); self.send_header('Content-Type', 'application/octet-stream'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b); return
+                b = j['case'] if m.group(2) == '/case' else j.get('vol')
+                if b is None: return self.json(dict(error='沒有影像資料'), 404)
+                self.send_response(200); self.send_header('Content-Type', 'application/octet-stream'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b); return
             with LOCK: return self.json({k: j[k] for k in ('state', 'step', 'progress', 'log', 'error')})
         if p.startswith('/api/'): return self.json(dict(error='not found'), 404)
         return super().do_GET()
@@ -147,7 +152,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             shutil.rmtree(dst, ignore_errors=True); return self.json(dict(error=str(e)), 400)
         jid = uuid.uuid4().hex
-        job = dict(state='queued', step=f'已收到 {cnt} 個檔案，排隊中', progress=0.1, log=[], error=None, case=None, t=time.time())
+        job = dict(state='queued', step=f'已收到 {cnt} 個檔案，排隊中', progress=0.1, log=[], error=None, case=None, vol=None, t=time.time())
         with LOCK: JOBS[jid] = job
         log_line(job, f'收到 {cnt} 個檔案（{n / 1e6:.0f} MB）')
         threading.Thread(target=run_job, args=(job, dst), daemon=True).start()

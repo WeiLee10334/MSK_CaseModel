@@ -32,7 +32,8 @@ class MskModel:
         self.F = take('i1', NVd * 3).reshape(-1, 3).astype(np.float64) * meta['inflScale'] / 127
         take('u1', NVd); self.MIX = take('u1', NV)
         qs = take('<u2', NS * 3); stl = take('<u2', NTs * 3); sn8 = take('i1', NS * 3)
-        take('i1', NS * 3); take('i1', NS * 3); self.tb = take('u1', NS).astype(np.float64) * meta['tbScale']
+        take('i1', NS * 3); self.sFem = take('i1', NS * 3).reshape(-1, 3).astype(np.float64) * meta['femScale'] / 127
+        self.tb = take('u1', NS).astype(np.float64) * meta['tbScale']
         self.scls = take('u1', NS)
         bm, bs = np.array(meta['bmin']), np.array(meta['bsz'])
         self.base = bm + qp.reshape(-1, 3).astype(np.float64) / 65535 * bs

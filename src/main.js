@@ -1,13 +1,14 @@
 import { fetchModel, TISSUE_ZH, REGIONS } from './model.js';
+import { CTView } from './ctview.js';
 import { Viewer, COL } from './viewer.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const h = (tag, attrs = {}, ...kids) => { const e = document.createElement(tag); for (const k in attrs) { if (k === 'class') e.className = attrs[k]; else if (k.startsWith('on')) e.addEventListener(k.slice(2), attrs[k]); else if (k === 'html') e.innerHTML = attrs[k]; else if (attrs[k] !== false && attrs[k] != null) e.setAttribute(k, attrs[k]); } for (const c of kids.flat()) if (c != null) e.append(c.nodeType ? c : document.createTextNode(c)); return e; };
 const f1 = (v) => (Math.round(v * 10) / 10).toFixed(1);
 const state = { c: { id: '', sex: 'M', H: 171, W: 75, chest: 104, waist: 82, hip: 95, under: 0, bf: 0, leg: 0, legAuto: false, arm: 1, shoulder: 1, auto: true, muscle: 0, off: new Array(11).fill(0) }, res: null, meas: null, tool: null, pts: [], last: null };
-let M, V, timer = 0;
+let M, V, CTV, timer = 0;
 const LIM = { H: [140, 200, 0.5], W: [35, 160, 0.5], chest: [65, 150, 0.5], waist: [50, 150, 0.5], hip: [65, 150, 0.5] };
-const LAYERS = [['muscle', '肌肉', COL.muscle], ['tendon', '肌腱、腱膜、支持帶', COL.tendon], ['fascia', '深筋膜（包覆肌肉，半透明）', COL.fascia], ['lig', '韌帶', COL.lig], ['bone', '骨骼', COL.bone], ['cart', '軟骨、椎間盤、半月板', COL.cart], ['bursa', '關節囊、滑液囊與腱鞘（半透明）', COL.capsule], ['ins', '肌肉起點（紅）與止點（藍）', COL.origin]];
+const LAYERS = [['muscle', '肌肉', COL.muscle], ['tendon', '肌腱、腱膜、支持帶', COL.tendon], ['fascia', '深筋膜（包覆全身肌肉的一整層，半透明；打開時像第二層皮膚）', COL.fascia], ['lig', '韌帶', COL.lig], ['bone', '骨骼', COL.bone], ['cart', '軟骨、椎間盤、半月板', COL.cart], ['bursa', '關節囊、滑液囊與腱鞘（半透明）', COL.capsule], ['ins', '肌肉起點（紅）與止點（藍）', COL.origin], ['eye', '眼球', COL.iris]];
 const hex = (n) => '#' + n.toString(16).padStart(6, '0');
 
 async function init() {
@@ -15,7 +16,7 @@ async function init() {
   try {
     M = await fetchModel(() => { msg.textContent = '解壓縮模型資料…'; });
     msg.textContent = '建立模型…'; await new Promise(r => setTimeout(r, 30));
-    V = new Viewer($('#cv'), M); theme();
+    V = new Viewer($('#cv'), M); theme(); CTV = new CTView(M, V, $('#stage'));
     const L = M.lm; M.s = 1; M.setG(0); M.buildLUT(); M.deformSkin(M.spos, null, false); const v0 = M.skinVolume(M.spos), m0 = { M: 0.9007 * M.phi0 * v0 + 1.10 * (v0 * (1 - M.phi0) - M.air) };
     Object.assign(state.c, { H: Math.round(L.H0), W: Math.round(m0.M), chest: Math.round(L.girth0[0]), waist: Math.round(L.girth0[1]), hip: Math.round(L.girth0[2]) });
     state.c.leg = Math.round(M.r0 * 1000) / 10; state.base = { ...state.c };
@@ -32,7 +33,7 @@ function update() {
   const c = state.c, t0 = performance.now();
   const res = state.res = M.solve({ ...c, leg: c.leg / 100 }); const sig = [M.s, res.kf.C, res.kf.W, res.kf.H, c.sex, c.leg, c.arm, c.shoulder].join(',');
   if (state.sexShown !== c.sex) { state.sexShown = c.sex; V.rebuild(); }
-  M.apply(sig !== state.last); state.last = sig; V.refresh(); state.meas = M.measure();
+  M.apply(sig !== state.last); state.last = sig; V.refresh(); state.meas = M.measure(); if (CTV && M.ct) CTV.invalidate();
   state.ms = Math.round(performance.now() - t0); renderFit(); renderMeas(); renderRegions(); if (V.selected) showInfo(V.selected); $('#busy').hidden = true;
   if (c.auto) { const s = $('#f-muscle'); if (s) { s.value = Math.round(res.gG * 100); $('#v-muscle').textContent = lvl(res.gG); } }
   if (M.ctOn() && c.legAuto) { $('#p-leg').value = (res.leg * 100).toFixed(1); $('#pv-leg').textContent = (res.leg * 100).toFixed(1) + '%'; }
@@ -76,8 +77,10 @@ function buildUI() {
   reg.append(h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => { c.off.fill(0); syncInputs(); schedule(10); } }, '各部位歸零')));
   // 圖層
   const lay = $('#t-layer');
-  lay.append(h('div', { class: 'row' }, h('label', {}, '皮膚'), h('input', { type: 'range', id: 'l-skin', min: 0, max: 100, step: 1, value: 0, oninput: (e) => { V.setSkin(e.target.value / 100); $('#lv-skin').textContent = e.target.value + '%'; markPreset(null); } }), h('span', { class: 'gv', id: 'lv-skin' }, '0%')));
-  for (const [k, label, col] of LAYERS) lay.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', id: 'l-' + k, checked: V.layers[k] ? '' : false, onchange: (e) => { V.setLayer(k, e.target.checked); markPreset(null); } }), h('i', { class: 'sw', style: 'background:' + hex(col) }), label));
+  lay.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', id: 'l-skinon', onchange: (e) => setSkinUI(e.target.checked ? (state.skinLast > 0.01 ? state.skinLast : 1) : 0) }), h('i', { class: 'sw', style: 'background:' + hex(COL.skin) }), h('b', {}, '皮膚')),
+    h('div', { class: 'row' }, h('label', {}, '不透明度'), h('input', { type: 'range', id: 'l-skin', min: 0, max: 100, step: 1, value: 0, oninput: (e) => setSkinUI(e.target.value / 100) }), h('span', { class: 'gv', id: 'lv-skin' }, '0%')),
+    h('p', { class: 'note', id: 'l-skinnote' }, ''));
+  for (const [k, label, col] of LAYERS) lay.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', id: 'l-' + k, checked: V.layers[k] ? '' : false, onchange: (e) => { V.setLayer(k, e.target.checked); if (V.layers.skin > 0.985) { setSkinUI(0); $('#l-skinnote').textContent = '皮膚原本是不透明的，會遮住內部圖層，已自動移除皮膚。要再看到皮膚，勾選上方「皮膚」或調整透明度。'; } markPreset(null); } }), h('i', { class: 'sw', style: 'background:' + hex(col) }), label));
   lay.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', id: 'l-outline', checked: '', onchange: (e) => V.setOutline(e.target.checked) }), '肌肉與骨骼的分界線'),
     h('div', { class: 'row' }, h('label', {}, '顯示範圍'), h('div', { class: 'seg', id: 'l-side' }, h('button', { 'data-v': 'all', class: 'on' }, '全身'), h('button', { 'data-v': 'R' }, '右半'), h('button', { 'data-v': 'L' }, '左半'))),
     h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => { V.hidden.clear(); V.isolate = null; V.rebuild(); } }, '恢復所有被隱藏的結構')),
@@ -117,8 +120,14 @@ function syncInputs() {
 }
 function preset(v) {
   const set = { surface: [1, 1, 1, 1], xray: [0.38, 1, 1, 1], muscle: [0, 1, 1, 1], bone: [0, 0, 0, 1] }[v]; if (!set) return;
-  V.layers.muscle = !!set[1]; V.layers.tendon = !!set[2]; V.layers.fascia = false; V.layers.bone = true; V.layers.cart = true; V.layers.lig = true; V.rebuild(); V.setSkin(set[0]);
-  $('#l-skin').value = Math.round(set[0] * 100); $('#lv-skin').textContent = Math.round(set[0] * 100) + '%'; for (const [k] of LAYERS) $('#l-' + k).checked = !!V.layers[k]; markPreset(v);
+  V.layers.muscle = !!set[1]; V.layers.tendon = !!set[2]; V.layers.fascia = false; V.layers.bone = true; V.layers.cart = true; V.layers.lig = true; V.layers.eye = v !== 'bone'; V.rebuild(); setSkinUI(set[0], true);
+  for (const [k] of LAYERS) $('#l-' + k).checked = !!V.layers[k]; markPreset(v);
+}
+function setSkinUI(op, keepPreset) {
+  V.setSkin(op); if (op > 0.01) state.skinLast = op;
+  const pct = Math.round(op * 100); $('#l-skin').value = pct; $('#lv-skin').textContent = pct + '%'; $('#l-skinon').checked = op > 0.01;
+  $('#l-skinnote').textContent = op > 0.985 ? '皮膚不透明時看不到內部；取消勾選「皮膚」或調低透明度，就能看到底下的肌肉與骨骼。' : '';
+  if (!keepPreset) markPreset(null);
 }
 function markPreset(v) { for (const b of $('#preset').children) b.classList.toggle('on', b.dataset.v === v); }
 function renderFit() {
@@ -165,7 +174,7 @@ function showInfo(p) {
   $('#i-zh').textContent = p.zh || p.en; $('#i-en').textContent = p.en; $('#i-sum').textContent = [kv[0][1], side, p.rg ? REGIONS[p.rg] : ''].filter(Boolean).join('・'); $('#i-more').open = innerWidth >= 900; $('#i-kv').replaceChildren(...kv.map(([a, b]) => h('div', {}, h('span', {}, a), h('b', {}, b)))); $('#info').hidden = false;
 }
 function setTool(t) { state.tool = state.tool === t ? null : t; state.pts = []; $('#tl-dist').classList.toggle('on', state.tool === 'dist'); $('#tl-girth').classList.toggle('on', state.tool === 'girth');
-  if (state.tool === 'girth' && V.layers.skin < 0.05) { V.setSkin(0.38); $('#l-skin').value = 38; $('#lv-skin').textContent = '38%'; markPreset('xray'); }
+  if (state.tool === 'girth' && V.layers.skin < 0.05) { setSkinUI(0.38, true); markPreset('xray'); }
   $('#toolout').textContent = state.tool === 'dist' ? '在模型上點兩個位置。' : state.tool === 'girth' ? '點皮膚上要量的高度（軀幹、上肢或下肢）。' : ''; $('#hint').textContent = state.tool ? $('#toolout').textContent : ''; $('#hint').hidden = !state.tool; }
 function tap(x, y) {
   if (state.tool === 'dist') { const hit = V.pick(x, y, true); if (!hit) return; if (state.pts.length >= 2) { state.pts = []; V.clearMarks(); } state.pts.push(hit.point); V.addDot(hit.point, 0xffd23f);
@@ -194,12 +203,12 @@ async function saveFile(filename, blob) {
 }
 const fname = (ext) => ((state.c.id || 'case').replace(/[^\w\-]+/g, '_') || 'case') + '.' + ext;
 function exportCsv() { const rows = [['項目', '數值', '單位', '等級', '量法'], ...measRows().map(([a, v, u, g, n]) => [a, f1(v), u, g, n])]; saveFile(fname('csv'), new Blob(['﻿' + rows.map(r => r.map(x => '"' + String(x).replace(/"/g, '""') + '"').join(',')).join('\r\n')], { type: 'text/csv' })); }
-function exportJson() { const r = state.res; saveFile(fname('json'), new Blob([JSON.stringify({ tool: '個案化肌骨模型 v0.4', source: 'Z-Anatomy (CC BY-SA 4.0) / BodyParts3D', case: state.c, ct: M.ct ? { applied: M.ct.on, scan: M.ct.hdr.scan, scaleFromCT: M.ct.s_ct, fitErrorCm: M.ct.hdr.fit, muscularity: M.ct.hdr.g, measurementsSupine: M.ct.hdr.meas, segmentation: M.ct.hdr.seg_model } : null, solution: { muscle: r.gG, subcutaneousFatFactor: r.f, trunkScale: r.kf, legScale: r.legScale, upperBodyScale: r.upScale, breastProjectionCm: r.A, underbustCm: r.under, bodyFatPrior: r.bfPrior, bodyFatSource: r.bfSrc, mass: r.mass }, measurements: Object.fromEntries(measRows().map(([a, v, u, g]) => [a, { value: +f1(v), unit: u, grade: g }])), regionMuscleVolumeL: Object.fromEntries(REGIONS.map((n, i) => [n, +state.meas.regVol[i].toFixed(3)]).slice(1)) }, null, 2)], { type: 'application/json' })); }
+function exportJson() { const r = state.res; saveFile(fname('json'), new Blob([JSON.stringify({ tool: '個案化肌骨模型 v0.5', source: 'Z-Anatomy (CC BY-SA 4.0) / BodyParts3D', case: state.c, ct: M.ct ? { applied: M.ct.on, scan: M.ct.hdr.scan, scaleFromCT: M.ct.s_ct, fitErrorCm: M.ct.hdr.fit, muscularity: M.ct.hdr.g, measurementsSupine: M.ct.hdr.meas, segmentation: M.ct.hdr.seg_model } : null, solution: { muscle: r.gG, subcutaneousFatFactor: r.f, trunkScale: r.kf, legScale: r.legScale, upperBodyScale: r.upScale, breastProjectionCm: r.A, underbustCm: r.under, bodyFatPrior: r.bfPrior, bodyFatSource: r.bfSrc, mass: r.mass }, measurements: Object.fromEntries(measRows().map(([a, v, u, g]) => [a, { value: +f1(v), unit: u, grade: g }])), regionMuscleVolumeL: Object.fromEntries(REGIONS.map((n, i) => [n, +state.meas.regVol[i].toFixed(3)]).slice(1)) }, null, 2)], { type: 'application/json' })); }
 async function exportPng() { saveFile(fname('png'), await V.png()); }
 init();
 
 // ---------- CT 個案 ----------
-const CTS = { server: false, job: null, show: { 'CT 骨骼': false, 'CT 體表': false, 'CT 肺與心臟': false } };
+const CTS = { server: false, job: null, volSrc: null, show: { 'CT 骨骼': false, 'CT 體表': false, 'CT 肺與心臟': false } };
 function buildCT() {
   const t = $('#t-ct');
   const pickDir = h('input', { type: 'file', webkitdirectory: '', multiple: '', hidden: true, onchange: (e) => upload([...e.target.files]) });
@@ -261,13 +270,29 @@ async function loadDemo() {
 }
 function alertNote(t) { $('#ct-res').hidden = false; $('#ct-res').replaceChildren(h('p', { class: 'note warn' }, t)); }
 async function loadCT(buf, demo) {
+  CTS.volSrc = demo ? 'demo' : (CTS.job ? 'api/ct/' + CTS.job + '/volume' : null); if (CTV) { CTV.close(); CTV.vol = null; }
   const ct = M.setCT(await gunzip(buf)); const hd = ct.hdr, c = state.c;
   V.setOverlays(ct.ov); for (const k in CTS.show) V.showOverlay(k, CTS.show[k]);
   c.legAuto = true; c.sex = 'M' === (hd.scan.sex || '').toUpperCase().slice(0, 1) ? 'M' : (hd.scan.sex || '').toUpperCase().startsWith('F') ? 'F' : c.sex;
-  c.H = Math.round(ct.s_ct * M.lm.H0); c.auto = true; CTS.demo = !!demo; CTS.Hest = c.H;
+  const H0 = c.H; c.H = Math.round(ct.s_ct * M.lm.H0); c.W = Math.round(c.W * (c.H / H0) ** 2); c.auto = true; CTS.demo = !!demo; CTS.Hest = c.H;      // 體重依原 BMI 隨身高換算，避免多出的體重全部堆到 CT 範圍外
   syncInputs(); $('#p-leg').disabled = true; update(); renderCT(); preset('xray');
 }
-function unloadCT() { M.setCT(null); V.setOverlays(null); state.c.legAuto = false; state.c.leg = Math.round(M.r0 * 1000) / 10; $('#p-leg').disabled = false; syncInputs(); update(); $('#ct-res').hidden = true; }
+async function openCTV() {
+  if (!CTV.vol) {
+    const b = $('#ctv-open'), msg = $('#ctv-msg'); b.disabled = true; msg.textContent = '載入影像…';
+    try {
+      let buf;
+      if (CTS.volSrc === 'demo') {
+        if (!window.__CT_DEMO_VOL) await new Promise((ok, no) => { const sc = document.createElement('script'); sc.src = 'ct-demo-vol.js'; sc.onload = ok; sc.onerror = () => no(new Error('找不到示範影像')); document.head.appendChild(sc); });
+        const bin = window.__CT_DEMO_VOL.map(atob).join(''), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); buf = u.buffer;
+      } else { const r = await fetch(CTS.volSrc); if (!r.ok) throw new Error('伺服器沒有這筆影像（可能已逾時刪除）'); buf = await r.arrayBuffer(); }
+      CTV.load(await gunzip(buf)); msg.textContent = '';
+    } catch (e) { msg.textContent = e.message; b.disabled = false; return; }
+    b.disabled = false;
+  }
+  CTV.open(); if (V.layers.skin > 0.5) { preset('xray'); }
+}
+function unloadCT() { if (CTV) { CTV.close(); CTV.vol = null; } M.setCT(null); V.setOverlays(null); state.c.legAuto = false; state.c.leg = Math.round(M.r0 * 1000) / 10; $('#p-leg').disabled = false; syncInputs(); update(); $('#ct-res').hidden = true; }
 function renderCT() {
   const ct = M.ct; if (!ct) return; const hd = ct.hdr, sc = hd.scan, me = hd.meas, fit = hd.fit, g = hd.g || {};
   const mm = (v) => v == null ? '—' : (v * 10).toFixed(1);
@@ -279,12 +304,13 @@ function renderCT() {
   const gtxt = g.all == null ? '無法推估' : lvl(g.all).replace(/^\S+\s/, '') + `（${g.all >= 0 ? '+' : ''}${Math.round(g.all * 100)}%）`;
   $('#ct-res').hidden = false;
   $('#ct-res').replaceChildren(
-    h('h3', {}, CTS.demo ? '示範個案（3D Slicer 範例胸部 CT）' : '個案 CT'),
+    h('h3', {}, CTS.demo ? '示範個案（3D Slicer 範例：胸腹部 CT 血管攝影）' : '個案 CT'),
     h('div', { class: 'note' }, `影像 ${sc.size.join('×')}，間距 ${sc.spacing.join('×')} mm；涵蓋 ${me.levels ? me.levels.join('–') : '—'}；分割 ${hd.seg_model}；處理 ${hd.seconds} 秒。${hd.demo ? '示範資料：' + hd.source + '。' : ''}`),
     h('div', { class: 'note' + (hd.arms_down ? '' : ' warn') }, hd.arms_down ? '上臂自然下垂：肩胛骨、鎖骨一併依 CT 擬合。' : '上臂上舉或不在影像內：肩帶與上臂沿用模板，胸壁肌肉被拉長，厚度與肌肉量推估可能偏低。'),
+    h('div', { class: 'row' }, h('button', { class: 'btn', id: 'ctv-open', disabled: CTS.volSrc ? false : '', onclick: openCTV }, '開啟 CT 影像檢視器'), h('span', { class: 'dim', id: 'ctv-msg' }, CTS.volSrc ? '' : '（此個案沒有影像資料）')),
     h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: ct.on ? '' : false, onchange: (e) => { ct.on = e.target.checked; c_leg(); update(); V.placeOverlays(); } }), '套用 CT 形狀（取消可對照模板）'),
     tog('CT 骨骼'), tog('CT 體表'), tog('CT 肺與心臟'),
-    h('p', { class: 'note' }, `身高預設為由胸廓大小推估的 ${CTS.Hest} cm，請改成實測值；腿長比例由 CT 的上身比例推算。肌肉發達程度（CT 範圍外沿用）：${gtxt}。`),
+    h('p', { class: 'note' }, `身高預設為由胸廓大小推估的 ${CTS.Hest} cm、體重依原 BMI 換算，請改成實測值；腿長比例由 CT 的上身比例推算。肌肉發達程度（CT 範圍外沿用）：${gtxt}。`),
     h('h3', {}, '擬合誤差（模型表面到 CT 表面，mm）'),
     tbl(['結構', '件數', '平均', 'P95'], [...rows.map(([n, v]) => [n, v[0], mm(v[1]), mm(v[2])]), ['體表', '', mm(fit.skin_mean), mm(fit.skin_p95)]]),
     h('p', { class: 'note' }, `射線有效比例：皮下脂肪層 ${Math.round(fit.rays_fat * 100)}%、肌肉層 ${Math.round(fit.rays_muscle * 100)}%。無效的位置（例如上臂上舉的肩部、影像邊緣）會較多沿用模板。`),
