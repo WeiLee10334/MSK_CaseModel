@@ -58,6 +58,8 @@ def main():
     # 鄰接（含補片）做擴散平滑
     T = np.r_[np.delete(m.stri, P['removeTris'], 0), np.array(P['tris']).reshape(-1, 3)]
     cls_all = np.r_[m.scls, np.zeros(NA - m.NS, np.uint8)]; ext = (cls_all & 8) > 0
+    brs = np.zeros(NA, bool)
+    if P.get('breast'): brs[np.array(P['breast']['idx'])] = True
     ed = np.r_[T[:, [0, 1]], T[:, [1, 2]], T[:, [2, 0]]]
     for rd in range(rounds):
         P['clear'] = [[int(i), round(float(v), 3)] for i, v in enumerate(clear) if v > 1e-3]; save_patch(P)
@@ -68,6 +70,15 @@ def main():
         for _ in range(2):      # 擴散到相鄰頂點，避免單點突起
             nb = np.zeros_like(add); np.maximum.at(nb, ed[:, 0], add[ed[:, 1]] * 0.6); np.maximum.at(nb, ed[:, 1], add[ed[:, 0]] * 0.6); add = np.maximum(add, nb)
         clear = np.minimum(clear + add, CAP)
+    # 補片（乳房、外陰）與乳房區的網格比原網格細很多：外推量先擴張再大範圍平均，變成平順的小隆起，不然會像皺紙
+    isp = (np.arange(NA) >= m.NS) | brs
+    deg = np.zeros(NA); np.add.at(deg, ed[:, 0], 1); np.add.at(deg, ed[:, 1], 1); deg[deg == 0] = 1
+    c2 = clear.copy()
+    for _ in range(8):
+        nb = c2.copy(); np.maximum.at(nb, ed[:, 0], c2[ed[:, 1]]); np.maximum.at(nb, ed[:, 1], c2[ed[:, 0]]); c2[isp] = nb[isp]
+    for _ in range(30):
+        sm_ = np.zeros(NA); np.add.at(sm_, ed[:, 0], c2[ed[:, 1]]); np.add.at(sm_, ed[:, 1], c2[ed[:, 0]]); c2[isp] = 0.5 * c2[isp] + 0.5 * (sm_ / deg)[isp]
+    clear = np.minimum(c2, CAP)
     P['clear'] = [[int(i), round(float(v), 3)] for i, v in enumerate(clear) if v > 1e-3]; save_patch(P)
     _, total = one_round(clear)
     print(f'完成：外推頂點 {len(P["clear"])}，最大 {clear.max():.2f} cm；最後檢查穿出頂點合計 {total}')

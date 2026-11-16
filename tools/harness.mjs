@@ -34,6 +34,6 @@ for (const cs of cases) {
   fs.writeFileSync(path.join(out, 'sbase.f32'), Buffer.from(M.sbase.buffer, M.sbase.byteOffset, M.sbase.byteLength));
   const hiddenMale = M.parts.filter((p) => c.sex === 'F' && p.male).map((p) => p.i);
   const meas = M.measure();
-  fs.writeFileSync(path.join(out, cs.name + '.json'), JSON.stringify({ case: c, A: res.A, f: res.f, g: res.gG, under: res.under, hiddenMale, skinTri: Array.from(M.skinTris()), NSall: M.NSall, meas: { chest: meas.chest, under: meas.under, waist: meas.waist, hip: meas.hip }, ms: Date.now() - t0 }));
+  fs.writeFileSync(path.join(out, cs.name + '.json'), JSON.stringify({ case: c, A: res.A, s: M.s, f: res.f, g: res.gG, under: res.under, hiddenMale, skinTri: Array.from(M.skinTris()), NSall: M.NSall, meas: { chest: meas.chest, under: meas.under, waist: meas.waist, hip: meas.hip }, ms: Date.now() - t0 }));
   console.log(cs.name, 'A', res.A.toFixed(2), 'f', res.f.toFixed(2), 'g', res.gG.toFixed(2), 'chest', meas.chest.toFixed(1), 'under', meas.under.toFixed(1), Date.now() - t0, 'ms');
 }

@@ -86,7 +86,7 @@ export class Viewer {
     this.skinMat.transparent = !full; this.skinMat.opacity = full ? 1 : op; this.skinMat.depthWrite = full; this.skinMat.depthFunc = full ? THREE.LessEqualDepth : THREE.LessEqualDepth; this.skinMat.needsUpdate = true; this.req();
   }
   setOutline(v) { this.outline = v; this.G.outline.visible = v && this.G.opaque.visible; this.req(); }
-  refresh() { this.placeOverlays(); this.aPos.needsUpdate = true; this.aNrm.needsUpdate = true; this.sPos.needsUpdate = true; this.sNrm.needsUpdate = true; this.uOutline.value = 0.07 * this.m.s; this.req(); }
+  refresh() { if (this.m.colDirty && this.skinSex === 'F') { this.sCol.array.set(this.m.scolF); this.sCol.needsUpdate = true; this.m.colDirty = false; } this.placeOverlays(); this.aPos.needsUpdate = true; this.aNrm.needsUpdate = true; this.sPos.needsUpdate = true; this.sNrm.needsUpdate = true; this.uOutline.value = 0.07 * this.m.s; this.req(); }
   select(p) {
     const col = this.col, c0 = this.col0, c = new THREE.Color(COL.select);
     if (this.selected) { const q = this.selected; col.set(c0.subarray(q.v0 * 3, (q.v0 + q.nv) * 3), q.v0 * 3); }

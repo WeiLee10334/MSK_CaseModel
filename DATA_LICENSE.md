@@ -20,6 +20,12 @@ Z-Anatomy 另列出其參考或納入的模型來源，完整清單見其 Readme
 - 計算肌肉增長位移場、皮下空間、皮膚平滑目標等參數化變形所需的資料。
 - 補上會陰處的皮膚開口，並產生女性體型用的皮膚修正量。
 
+## 女性乳房形狀（`docs/patches.js` 的 breast 欄位）
+
+取自 MakeHuman 1.x 的基礎網格與乳房 target（female-young-averagemuscle-averageweight 的罩杯×堅挺度組合）。MakeHuman 的網格與 target 資料自 2020 年 9 月起以 CC0 1.0 釋出：
+https://github.com/makehumancommunity/makehuman （網格、target 等資產的授權見該專案 LICENSE.md、LICENSE.ASSETS.md）
+本專案把乳房相對胸壁的位移向量換算到本模型的皮膚頂點上；CC0 不要求署名，此處列出來源以便查證。
+
 ## 示範個案（`docs/ct-demo.js`、`docs/ct-demo-vol.js`）
 
 由 3D Slicer SampleData 的 CTACardio（`CTA-cardio.nrrd`，https://github.com/Slicer/SlicerTestingData ）經本專案的 CT 流程產生。依 3D Slicer 社群說明，隨 Slicer 釋出的範例資料適用 3D Slicer License（BSD 風格）：

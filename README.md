@@ -28,7 +28,7 @@ v0.4 起可上傳個案的 CT（例如胸部 CT）：在地端伺服器上自動
 | `ctpipe/` | CT 個案流程：讀檔與去識別（`ctio.py`）、自動分割（`segment.py`）、擬合（`ctfit.py`）、輸出個案檔（`pipeline.py`） |
 | `server.py` | 地端伺服器：提供網頁與 CT 上傳、處理、下載 API（只用 Python 標準函式庫） |
 | `docs/ct-demo.js`、`docs/ct-demo-vol.js` | 示範個案（3D Slicer 範例 CTACardio）的個案檔與檢視用影像 |
-| `docs/patches.js` | 女性皮膚補片、胯下提升量、皮膚間隙（`tools/build_patches.py`、`tools/clearance.py` 產生） |
+| `docs/patches.js` | 女性皮膚補片、胯下提升量、乳房位移向量、皮膚間隙（`tools/build_patches.py`、`tools/breast_makehuman.py`、`tools/clearance.py` 產生） |
 | `src/ctview.js` | CT 影像檢視器（橫切面、矢狀面、冠狀面與 3D 切面同步） |
 | `tools/harness.mjs`、`tools/poke_check.py`、`tools/fold_check.py` | 在 Node 執行網頁變形程式，檢查結構穿出皮膚與皮膚翻折 |
 | `build.mjs` | 用 esbuild 把 `src/` 打包到 `docs/` |
@@ -58,13 +58,14 @@ python3 tools/pack_model.py docs/model.bin docs/model.js
 模板是一位成年男性。女性模式下：
 
 - 外生殖器：原男性外生殖器的皮膚三角形不顯示，改用新網格（受限 Delaunay 品質網格、調和曲面基底），做出陰阜、大陰唇與中線裂隙；胯下周圍皮膚與其下 3 cm 內的淺層結構平滑上提到胯下高度。
-- 乳房：底面上緣約第 2 肋、下緣為乳房下皺襞、內側離胸骨中線至少 1.6 cm、外側到前腋線；下半部飽滿、上半部緩坡；推出方向用平滑胸壁法向。乳頭周圍 3.4 cm 細分網格，加上乳暈（顏色與微隆）與乳頭。
+- 乳房：形狀取自 MakeHuman（CC0）年輕女性的小、中、大罩杯（堅挺度取最高，避免大罩杯過度下垂）。先在 MakeHuman 上把乳房從胸壁分離（胸壁以對齊後的男性胸部估計），再依「離乳頭的水平、垂直距離」對應到本模型的胸前皮膚，存成三組位移向量；網頁依上、下胸圍求得的罩杯在三組間內插（比最小罩杯更小時逐漸收平）。乳頭位置依 MakeHuman 女性的比例（乳頭離中線 / 前胸半寬、乳頭高度 / 身高）換算。乳房區域另做細分網格；乳暈顏色依變形後離乳頭的距離即時計算（直徑約 3.6–4.6 cm），不隨皮膚拉伸變大。下胸圍量在乳房下緣的胸壁上（不含乳房），上胸圍量在乳頭高度。
 - 骨盆、顱骨、臉部仍是男性形態。
 
 重建補片與皮膚間隙（模型資料或變形程式改動後）：
 
 ```
 python3 tools/build_patches.py docs/model.js docs/patches.js
+python3 -I tools/breast_makehuman.py <MakeHuman 原始碼>/makehuman/data      # 乳房（會再呼叫 build_patches.py，並寫 tools/breast_site.json）
 python3 tools/clearance.py 3
 node tools/harness.mjs /tmp/h '[{"name":"F","sex":"F"},{"name":"M"}]' && python3 tools/poke_check.py /tmp/h && python3 tools/fold_check.py /tmp/h
 ```

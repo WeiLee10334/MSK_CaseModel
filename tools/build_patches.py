@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'ctpipe'))
 from mskmodel import MskModel
 
 sm = lambda a, b, x: np.clip((np.asarray(x, float) - a) / (b - a), 0, 1) ** 2 * (3 - 2 * np.clip((np.asarray(x, float) - a) / (b - a), 0, 1))
+SITE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'breast_site.json')
 
 
 def boundary_loop(T, rem):
@@ -77,10 +78,10 @@ def closest_on_tris(Q, V, T, bary=False):
 class Builder:
     def __init__(self, m):
         self.m = m; self.S = m.sbase; self.T = m.stri; self.NS = m.NS
-        self.verts, self.interp, self.areola = [], [], []
+        self.verts, self.interp, self.areola = [], [], []; self.nipw = []; self.flatn = {}
         self.tris, self.remove = [], np.zeros(len(self.T), bool)
 
-    def add(self, P, weights, areola=None):
+    def add(self, P, weights, areola=None, nip=None):
         """新增補片頂點；weights[n] = [(原頂點索引, 權重), …]，網頁端以此內插脂肪厚度、肌肉增長場等屬性。回傳全域索引。"""
         base = self.NS + len(self.verts)
         for n, p in enumerate(P):
@@ -88,7 +89,7 @@ class Builder:
             for i, w in weights[n]: acc[int(i)] += float(w)
             tot = sum(acc.values())
             self.verts.append(p); self.interp.append([[i, round(w / tot, 4)] for i, w in acc.items() if w / tot > 1e-4])
-            self.areola.append(0.0 if areola is None else float(areola[n]))
+            self.areola.append(0.0 if areola is None else float(areola[n])); self.nipw.append(0.0 if nip is None else float(nip[n]))
         return np.arange(base, base + len(P))
 
     def triangulate(self, uv, gidx, outward, simplices=None):
@@ -237,10 +238,14 @@ class Builder:
         以所在原三角形的重心座標內插屬性；加上乳暈（半徑約 1.8 cm 微隆）與乳頭（直徑約 1.1 cm、高約 0.6 cm）。"""
         import triangle as tr_
         m, S, T = self.m, self.S, self.T; L = m.lm
-        c0 = np.array([side * abs(L['nipple'][0]), L['nipple'][1], L['nipple'][2]])
-        j0 = cKDTree(S).query(c0)[1]; n0 = m.sn[j0]
-        R = 3.4
-        near = np.linalg.norm(S - c0, axis=1) < R
+        c0 = np.array([side * abs(L['nipple'][0]), L['nipple'][1], L['nipple'][2]]); su = sv = 1.0; dirn = None
+        if os.path.exists(SITE):      # 女性乳頭位置與大小（tools/breast_makehuman.py：依 MakeHuman 女性比例換算回靜止座標，並抵銷變形與乳房隆起造成的拉伸）
+            st = json.load(open(SITE))[str(side)]; c0 = np.array(st['c']); su, sv = st['su'], st['sv']; dirn = np.array(st['dir'])
+        j0 = cKDTree(S).query(c0)[1]; n0 = m.sn[j0]; dirn = n0 if dirn is None else dirn / np.linalg.norm(dirn)
+        if os.path.exists(SITE):      # 女性：補片涵蓋乳房大部分（隆起後皮膚會被撐大好幾倍，原本約 1 cm 的三角形不夠細）
+            near = np.linalg.norm(S - c0, axis=1) < 7.5
+        else:
+            near = np.linalg.norm(S - c0, axis=1) < 3.4
         rem = near[T].all(1) & (m.sn[T[:, 0], 2] > 0) & (m.scls[T[:, 0]] == 0); rem_tris = T[rem]
         self.remove |= rem
         loop = boundary_loop(T, rem)
@@ -248,16 +253,22 @@ class Builder:
         e1 = np.array([1.0, 0, 0]) - n0[0] * n0; e1 /= np.linalg.norm(e1); e2 = np.cross(n0, e1)
         B2 = np.c_[(S[loop] - c) @ e1, (S[loop] - c) @ e2]; n = len(loop)
         seg = np.c_[np.arange(n), (np.arange(n) + 1) % n]
-        out = tr_.triangulate({'vertices': np.vstack([B2, [[0.0, 0.0]]]), 'segments': seg}, 'pq30a0.04Y')
+        out = tr_.triangulate({'vertices': np.vstack([B2, [[0.0, 0.0]]]), 'segments': seg}, 'pq30a0.05Y')
+        for _ in range(2):      # 乳暈、乳頭處加密（三角形面積上限依離中心的距離）
+            cen = out['vertices'][out['triangles']].mean(1); rc = np.hypot(cen[:, 0] / su, cen[:, 1] / sv)
+            out['triangle_max_area'] = np.where(rc < 0.9, 0.006 * min(su, sv) ** 2, np.where(rc < 2.4, 0.015 * min(su, sv) ** 2, 0.06))
+            out = tr_.triangulate(out, 'rpq30aY')
         V2, F2 = out['vertices'], out['triangles']; assert np.allclose(V2[:n], B2)
         Q = c + V2[n:, :1] * e1 + V2[n:, 1:2] * e2
         pts, ti, bc = closest_on_tris(Q, S, rem_tris, bary=True)
         W = [[(rem_tris[ti[k], q], bc[k, q]) for q in range(3)] for k in range(len(pts))]
-        rho = np.linalg.norm(V2[n:], axis=1)
-        h = 0.12 * (1 - sm(1.2, 2.0, rho)) + 0.55 * (1 - sm(0.35, 0.62, rho)) + 0.08 * (1 - sm(0.0, 0.3, rho))
-        pts = pts + n0 * h[:, None]
+        rho = np.hypot(V2[n:, 0] / su, V2[n:, 1] / sv)      # su、sv：靜止座標裡乳暈的縮放（變形後左右被壓縮、乳房隆起把皮膚撐開），最後成品是約 4 cm 的圓
+        h = 0.04 * (1 - sm(1.2, 2.0, rho)) + 0.48 * (1 - sm(0.35, 0.62, rho)) + 0.07 * (1 - sm(0.0, 0.3, rho))      # 乳暈幾乎平貼，乳頭約 0.5 cm
+        pts = pts + dirn * h[:, None]      # 乳頭朝向：女性胸前的方向（MakeHuman 乳頭法向），不是男性模板此處偏向側面的法向
         are = 1 - sm(1.55, 2.05, rho)
-        gidx_in = self.add(pts, W, areola=are)
+        gidx_in = self.add(pts, W, areola=are, nip=1 - sm(0.35, 0.62, rho))
+        for g_, r_ in zip(gidx_in, rho):
+            if r_ < 1.0: self.flatn[int(g_) - self.NS] = n0
         gidx = np.r_[loop, gidx_in]
         outward = np.r_[m.sn[loop], np.repeat(n0[None], len(pts), 0)]
         self.triangulate(V2, gidx, outward, simplices=F2)
@@ -269,7 +280,9 @@ class Builder:
         n = np.zeros_like(allP)
         for k in range(3): np.add.at(n, Tf[:, k], fn)
         n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
-        return n[self.NS:], Tf, allP
+        N = n[self.NS:]
+        for j, fn_ in self.flatn.items(): N[j] = fn_      # 乳頭、乳暈：脂肪層等沿法向的位移用平滑胸壁法向，避免乳頭根部凹角處交錯翻折
+        return N, Tf, allP
 
 
 def main():
@@ -286,7 +299,7 @@ def main():
     print('orient', b.orient_info); print('vulva', b.vulva_info, '| patch verts', len(b.verts), 'tris', len(b.tris), 'removed', int(b.remove.sum()), '| non-manifold edges', bad)
     r = lambda x, d=3: [round(float(v), d) for v in np.asarray(x).ravel()]
     data = dict(version=1, NS=m.NS, removeTris=np.where(b.remove)[0].tolist(), verts=r(b.verts), normals=r(N), tris=np.array(b.tris).ravel().tolist(),
-                interp=b.interp, areola=r(b.areola, 2),
+                interp=b.interp, areola=r(b.areola, 2), nipple=r(b.nipw, 2),
                 femDisp=[[i] + [round(float(v), 3) for v in d] for i, d in sorted(getattr(b, 'fem_disp', {}).items())],
                 femDispV=[[i] + [round(float(v), 3) for v in d] for i, d in sorted(getattr(b, 'fem_disp_v', {}).items())])
     js = 'window.__PATCH = ' + json.dumps(data, separators=(',', ':')) + ';\n'
