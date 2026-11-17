@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""地端伺服器：提供網頁（docs/）與 CT 解析 API。只用 Python 標準函式庫，CT 不離開這台電腦。
+"""地端伺服器：提供網頁（docs/）與 CT／MR 影像重建 API。只用 Python 標準函式庫，影像不離開這台電腦。
 
     python3 server.py                  # http://127.0.0.1:8765
     python3 server.py --host 0.0.0.0   # 讓院內網路其他電腦連線（請自行確認網段與防火牆）
 
 API
     GET  /api/health          {"ok": true, ...}
-    POST /api/ct              上傳（網頁的多檔容器格式，或單一 zip / nii / nrrd 檔）→ {"id": ...}
+    POST /api/ct?modality=auto  上傳（網頁的多檔容器格式，或單一 zip / nii / nrrd 檔）；modality = auto / CT / MR → {"id": ...}
     GET  /api/ct/<id>         處理狀態 {"state": queued|running|done|error, "step", "progress", "log", "error"}
-    GET  /api/ct/<id>/case    個案檔（.ctcase，gzip）
+    GET  /api/ct/<id>/case    重建檔（.reco，gzip：各結構表面、體積、量化指標）
     GET  /api/ct/<id>/volume  檢視用影像體積（gzip：標頭 JSON＋int16，約 1.5 mm）
     DELETE /api/ct/<id>       立即刪除該筆結果
-原始上傳檔在處理完（成功或失敗）後立即刪除；個案檔只保留在記憶體，逾時（預設 6 小時）或伺服器結束即消失。
+原始上傳檔在處理完（成功或失敗）後立即刪除；重建檔只保留在記憶體，逾時（預設 6 小時）或伺服器結束即消失。
 """
 import argparse, http.server, json, os, re, shutil, struct, sys, tempfile, threading, time, traceback, uuid
 from urllib.parse import urlparse
@@ -22,7 +22,7 @@ DOCS = os.path.join(HERE, 'docs')
 JOBS = {}
 LOCK = threading.Lock()
 QUEUE = threading.Semaphore(1)          # 一次只處理一筆（分割模型吃記憶體）
-CFG = dict(fast=True, device=None, keep_hours=6.0, max_upload=4 << 30, model=os.path.join(DOCS, 'model.js'))
+CFG = dict(fast=True, device=None, keep_hours=6.0, max_upload=4 << 30)
 
 
 def log_line(job, msg):
@@ -78,15 +78,15 @@ def pick_input(folder):
     return vol[0] if len(vol) == 1 and len(files) <= 2 else folder
 
 
-def run_job(job, upload_dir):
+def run_job(job, upload_dir, modality='auto'):
     import pipeline
     with QUEUE:
-        job['state'] = 'running'; work = tempfile.mkdtemp(prefix='ctwork_'); out = os.path.join(work, 'case.ctcase')
+        job['state'] = 'running'; work = tempfile.mkdtemp(prefix='ctwork_'); out = os.path.join(work, 'case.reco')
         try:
             def step(s, p):
                 with LOCK: job['step'], job['progress'] = s, round(0.1 + 0.9 * p, 3)
                 log_line(job, s)
-            hdr = pipeline.run(pick_input(upload_dir), out, CFG['model'], workdir=work, fast=CFG['fast'], log=lambda *a: log_line(job, ' '.join(map(str, a))), step=step, device=CFG['device'])
+            hdr = pipeline.run(pick_input(upload_dir), out, workdir=work, fast=CFG['fast'], log=lambda *a: log_line(job, ' '.join(map(str, a))), step=step, device=CFG['device'], modality=modality)
             with open(out, 'rb') as f: job['case'] = f.read()
             if os.path.exists(out + '.vol'):
                 with open(out + '.vol', 'rb') as f: job['vol'] = f.read()
@@ -128,7 +128,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         p = urlparse(self.path).path
         if p == '/api/health':
-            return self.json(dict(ok=True, version='0.4', fast=CFG['fast'], device=CFG['device'] or 'auto', busy=any(j['state'] == 'running' for j in JOBS.values())))
+            return self.json(dict(ok=True, version='0.6', fast=CFG['fast'], device=CFG['device'] or 'auto', busy=any(j['state'] == 'running' for j in JOBS.values())))
         m = re.fullmatch(r'/api/ct/([0-9a-f]{32})(/case|/volume)?', p)
         if m:
             j = self.job(m.group(1))
@@ -143,7 +143,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
-        if urlparse(self.path).path != '/api/ct': return self.json(dict(error='not found'), 404)
+        u = urlparse(self.path)
+        if u.path != '/api/ct': return self.json(dict(error='not found'), 404)
+        mq = re.search(r'(?:^|&)modality=(auto|CT|MR)(?:&|$)', u.query or ''); modality = mq.group(1) if mq else 'auto'
         n = int(self.headers.get('Content-Length') or 0)
         if n <= 0: return self.json(dict(error='沒有收到檔案'), 400)
         if n > CFG['max_upload']: return self.json(dict(error=f'檔案太大（上限 {CFG["max_upload"] >> 20} MB）'), 413)
@@ -155,7 +157,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         job = dict(state='queued', step=f'已收到 {cnt} 個檔案，排隊中', progress=0.1, log=[], error=None, case=None, vol=None, t=time.time())
         with LOCK: JOBS[jid] = job
         log_line(job, f'收到 {cnt} 個檔案（{n / 1e6:.0f} MB）')
-        threading.Thread(target=run_job, args=(job, dst), daemon=True).start()
+        threading.Thread(target=run_job, args=(job, dst, modality), daemon=True).start()
         self.json(dict(id=jid))
 
     def do_DELETE(self):
@@ -166,7 +168,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='個案化肌骨模型：地端網頁與 CT 解析伺服器')
+    ap = argparse.ArgumentParser(description='個案化肌骨模型：地端網頁與 CT／MR 影像重建伺服器')
     ap.add_argument('--host', default='127.0.0.1'); ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--full', action='store_true', help='用 1.5 mm 分割模型（建議有 GPU 時使用）')
     ap.add_argument('--device', default=None, help='gpu / cpu / mps（預設自動）')

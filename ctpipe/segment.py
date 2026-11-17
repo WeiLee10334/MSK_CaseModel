@@ -1,9 +1,9 @@
-# 以 TotalSegmentator（total 任務，可商用）分割 CT。另開子行程執行，記憶體用完即釋放。
+# 以 TotalSegmentator 分割（CT 用 total、MR 用 total_mr，兩者皆不需授權）。另開子行程執行，記憶體用完即釋放。
 import os, sys, json, subprocess, tempfile, time
 import SimpleITK as sitk
 
 
-def segment(img, workdir, fast=True, device=None, log=print):
+def segment(img, workdir, fast=True, device=None, log=print, task='total'):
     """img：sitk 影像（LPS）。回傳 (標籤影像, {編號: 類別名稱})。"""
     os.makedirs(workdir, exist_ok=True)
     src = os.path.join(workdir, 'ct.nii.gz'); dst = os.path.join(workdir, 'seg.nii.gz')
@@ -16,14 +16,21 @@ def segment(img, workdir, fast=True, device=None, log=print):
         'import sys,json\n'
         'from totalsegmentator.python_api import totalsegmentator\n'
         'from totalsegmentator.map_to_binary import class_map\n'
-        f'totalsegmentator(sys.argv[1], sys.argv[2], ml=True, fast={fast!r}, device={device!r}, task="total", nr_thr_resamp=1, nr_thr_saving=1, quiet=True, skip_saving=False)\n'
-        'json.dump(class_map["total"], open(sys.argv[3], "w"))\n')
+        'from totalsegmentator.config import setup_totalseg, set_config_key\n'
+        'setup_totalseg(); set_config_key("send_usage_stats", False)\n'      # TotalSegmentator 預設會回傳使用統計（不含影像）；地端一律關閉
+        f'totalsegmentator(sys.argv[1], sys.argv[2], ml=True, fast={fast!r}, device={device!r}, task={task!r}, nr_thr_resamp=1, nr_thr_saving=1, quiet=True, skip_saving=False)\n'
+        f'json.dump(class_map[{task!r}], open(sys.argv[3], "w"))\n')
     cm = os.path.join(workdir, 'classes.json'); t0 = time.time()
-    log(f'分割中（TotalSegmentator，{"3 mm 快速模型" if fast else "1.5 mm 模型"}，{device.upper()}）')
+    log(f'分割中（TotalSegmentator {task}，{"3 mm 快速模型" if fast else "1.5 mm 模型"}，{device.upper()}）')
     env = dict(os.environ, TOTALSEG_DISABLE_HTTP1='1', OMP_NUM_THREADS=str(os.cpu_count() or 2))
-    r = subprocess.run([sys.executable, '-c', code, src, dst, cm], capture_output=True, text=True, env=env)
+    # 子行程的輸出寫到檔案，不用管線：nnU-Net 會再開子行程，若用管線，主程式被系統終止時孫行程仍握著管線，這裡會一直等不到結束
+    lf = os.path.join(workdir, 'seg.log')
+    with open(lf, 'w') as fo:
+        r = subprocess.run([sys.executable, '-c', code, src, dst, cm], stdout=fo, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
     if r.returncode != 0 or not os.path.exists(dst):
-        raise RuntimeError('分割失敗：' + (r.stderr or r.stdout)[-800:])
+        tail = open(lf, errors='replace').read()[-800:]
+        if r.returncode in (-9, 137): raise RuntimeError('分割程式被系統終止，多半是記憶體不足（建議 8 GB 以上，或關閉其他程式後重試）')
+        raise RuntimeError('分割失敗：' + tail)
     log(f'分割完成 {time.time() - t0:.0f} 秒')
     lab = sitk.ReadImage(dst)
     lab = sitk.DICOMOrient(lab, 'LPS')

@@ -73,12 +73,18 @@ def load_ct(path):
         if tmp: shutil.rmtree(tmp, ignore_errors=True)
     if img.GetDimension() != 3: raise ValueError('需要 3D 影像')
     img = sitk.DICOMOrient(img, 'LPS')
+    if img.GetPixelID() in (sitk.sitkFloat32, sitk.sitkFloat64):      # MR 常以浮點存放、範圍很小：先拉到 0–4000 再存成 int16
+        a = sitk.GetArrayViewFromImage(img); p1, p99 = np.percentile(a[::4, ::8, ::8], [1, 99])
+        if p1 >= -10 and p99 < 100: img = sitk.Cast(img, sitk.sitkFloat32) * float(4000.0 / max(p99, 1e-6))
     img = sitk.Cast(img, sitk.sitkInt16) if img.GetPixelID() != sitk.sitkInt16 else img
     for k in list(img.GetMetaDataKeys()): img.EraseMetaData(k)
     sp = img.GetSpacing(); sz = img.GetSize()
     info.update(size=list(sz), spacing=[round(s, 3) for s in sp], extent_mm=[round(a * b, 1) for a, b in zip(sz, sp)])
     a = sitk.GetArrayViewFromImage(img)
     info['hu_p50'] = float(np.percentile(a[::4, ::8, ::8], 50))
+    # 影像類型：DICOM 有 Modality 就用；沒有時，CT 會有大量接近 −1000 的空氣，MR 沒有負值
+    mod = (info.get('modality') or '').upper()
+    info['modality'] = 'MR' if mod in ('MR', 'MRI') else 'CT' if mod == 'CT' else ('CT' if float(np.percentile(a[::4, ::8, ::8], 1)) < -500 else 'MR')
     return img, info
 
 

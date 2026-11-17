@@ -26,9 +26,9 @@ Z-Anatomy 另列出其參考或納入的模型來源，完整清單見其 Readme
 https://github.com/makehumancommunity/makehuman （網格、target 等資產的授權見該專案 LICENSE.md、LICENSE.ASSETS.md）
 本專案把乳房相對胸壁的位移向量換算到本模型的皮膚頂點上；CC0 不要求署名，此處列出來源以便查證。
 
-## 示範個案（`docs/ct-demo.js`、`docs/ct-demo-vol.js`）
+## 示範（`docs/demo-a.js`、`demo-a-vol.js`、`demo-b.js`、`demo-b-vol.js`）
 
-由 3D Slicer SampleData 的 CTACardio（`CTA-cardio.nrrd`，https://github.com/Slicer/SlicerTestingData ）經本專案的 CT 流程產生。依 3D Slicer 社群說明，隨 Slicer 釋出的範例資料適用 3D Slicer License（BSD 風格）：
+由 3D Slicer SampleData 的 CTACardio（`CTA-cardio.nrrd`，https://github.com/Slicer/SlicerTestingData ）經本專案的影像流程產生。依 3D Slicer 社群說明，隨 Slicer 釋出的範例資料適用 3D Slicer License（BSD 風格）：
 https://github.com/Slicer/Slicer/blob/main/License.txt
 
-`ct-demo.js` 只有模型頂點的位移與權重、擬合誤差、CT 實測摘要與疊圖網格；`ct-demo-vol.js` 為降解析度（約 1.5 × 1.5 × 2.5 mm）的影像體積，供網頁檢視器使用。兩者皆不含任何個人資料。
+`demo-a.js` 是各結構的 3D 表面、體積與量化摘要；`demo-a-vol.js` 為降解析度（約 1.5 × 1.5 × 2.5 mm）的影像體積，供網頁檢視器使用。`demo-b*.js` 是以同一份影像人工模擬的追蹤檢查（肌肉外緣削去、肝臟外緣增加、加上旋轉與位移），不是真實病人的追蹤資料。皆不含任何個人資料。

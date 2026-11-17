@@ -77,12 +77,14 @@ export class Viewer {
       for (const p of sets[k]) { a.set(m.idx.subarray(p.t0 * 3, (p.t0 + p.nt) * 3), o); o += p.nt * 3; }
       const g = this.G[k].geometry; g.setIndex(new THREE.BufferAttribute(a, 1)); g.setDrawRange(0, n); this.G[k].visible = n > 0;
     }
-    this.G.outline.visible = this.outline && this.G.opaque.visible; this.req();
+    this.G.outline.visible = this.outline && this.G.opaque.visible;
+    if (this.humanOn === false) for (const k in this.G) this.G[k].visible = false;
+    this.req();
   }
   setLayer(k, v) { this.layers[k] = v; if (k === 'skin') this.setSkin(v); else this.rebuild(); }
   setSkin(op) {
     const wasFull = this.layers.skin > 0.985; this.layers.skin = op; const on = op > 0.01, full = op > 0.985; const hair = op > 0.5; if (hair !== this.layers.hair || wasFull !== full) { this.layers.hair = hair; this.rebuild(); }
-    this.skin.visible = on; this.skinPre.visible = on && !full;
+    const hu = this.humanOn !== false; this.skin.visible = on && hu; this.skinPre.visible = on && !full && hu;
     this.skinMat.transparent = !full; this.skinMat.opacity = full ? 1 : op; this.skinMat.depthWrite = full; this.skinMat.depthFunc = full ? THREE.LessEqualDepth : THREE.LessEqualDepth; this.skinMat.needsUpdate = true; this.req();
   }
   setOutline(v) { this.outline = v; this.G.outline.visible = v && this.G.opaque.visible; this.req(); }
@@ -174,6 +176,30 @@ export class Viewer {
     p.needsUpdate = true; l.needsUpdate = true;
     if (img) { this.sliceTex.image = img; this.sliceTex.needsUpdate = true; }
     this.slicePlane.visible = true; this.req();
+  }
+  // ---------- 影像模式：人形模板整個隱藏，只顯示影像重建
+  setHuman(on) {
+    this.humanOn = on; if (this.ovGroup) this.ovGroup.visible = on; if (this.slicePlane) this.slicePlane.visible = false;
+    this.rebuild(); this.setSkin(this.layers.skin); this.req();
+  }
+  setRecon(groups) {
+    for (const g of this.reconGroups || []) this.scene.remove(g);
+    this.reconGroups = groups ? groups.filter(Boolean) : []; for (const g of this.reconGroups) this.scene.add(g); this.req();
+  }
+  // 讓 box（世界座標）完整落在畫面內；dir：相機方向（front/back/left/right 或向量）
+  frameBox(box, dir) {
+    const c = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3()), tanH = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+    const d = dir ? ({ front: [0, 0, 1], back: [0, 0, -1], left: [1, 0, 0], right: [-1, 0, 0] }[dir] || dir) : this.camera.position.clone().sub(this.controls.target).normalize().toArray();
+    const side = Math.abs(d[0]) > Math.abs(d[2]), w = side ? sz.z : sz.x, D = 1.12 * Math.max((sz.y / 2) / tanH, (w / 2) / (tanH * this.camera.aspect)) + (side ? sz.x : sz.z) / 2;
+    const v = new THREE.Vector3(...d).normalize();
+    this.controls.target.copy(c); this.camera.position.copy(c).addScaledVector(v, D); this.camera.near = Math.max(0.5, D / 200); this.camera.far = D * 20; this.camera.updateProjectionMatrix(); this.controls.update(); this.req();
+  }
+  // 影像重建的點選：可見、且不是半透明體表的最近交點
+  pickRecon(cx, cy) {
+    const rc = new THREE.Raycaster(), r = this.canvas.getBoundingClientRect();
+    rc.setFromCamera(new THREE.Vector2(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1), this.camera);
+    const objs = []; for (const g of this.reconGroups || []) g.traverse(o => { if (o.isMesh && o.visible && o.userData.s && !(o.userData.s.cat === 'skin' && o.material.opacity < 0.6)) objs.push(o); });
+    const hit = rc.intersectObjects(objs, false)[0]; return hit ? { mesh: hit.object, s: hit.object.userData.s, point: hit.point } : null;
   }
   showOverlay(name, on) { if (this.ov && this.ov[name]) { this.ov[name].visible = on; this.req(); } }
   clearMarks() { for (const c of [...this.marks.children]) { this.marks.remove(c); c.geometry && c.geometry.dispose(); } this.req(); }
